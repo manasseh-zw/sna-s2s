@@ -1,0 +1,137 @@
+import React from "react"
+import { Mic } from "lucide-react"
+import { AnimatePresence, motion } from "motion/react"
+
+import { cn } from "@/lib/utils"
+
+interface VoiceInputProps {
+  onStart?: () => void
+  onStop?: () => void
+}
+
+export function VoiceInput({
+  className,
+  onStart,
+  onStop,
+}: React.ComponentProps<"div"> & VoiceInputProps) {
+  const [_listening, _setListening] = React.useState<boolean>(false)
+  const [_time, _setTime] = React.useState<number>(0)
+
+  React.useEffect(() => {
+    let intervalId: NodeJS.Timeout
+
+    if (_listening) {
+      onStart?.()
+      intervalId = setInterval(() => {
+        _setTime((t) => t + 1)
+      }, 1000)
+    } else {
+      onStop?.()
+      _setTime(0)
+    }
+
+    return () => clearInterval(intervalId)
+  }, [_listening])
+
+  const formatTime = (seconds: number) => {
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
+  }
+
+  const onClickHandler = () => {
+    _setListening(!_listening)
+  }
+
+  return (
+    <div className={cn("flex flex-col items-center justify-center", className)}>
+      <motion.div
+        className={cn(
+          "flex cursor-pointer items-center justify-center rounded-full p-4",
+          _listening
+            ? "border border-input bg-background text-foreground"
+            : "border border-primary bg-primary text-primary-foreground"
+        )}
+        layout
+        transition={{
+          layout: {
+            duration: 0.4,
+          },
+        }}
+        onClick={onClickHandler}
+      >
+        <div className="flex h-8 w-8 items-center justify-center">
+          {_listening ? (
+            <motion.div
+              className="h-5 w-5 rounded-sm bg-[#ef233c]"
+              animate={{
+                rotate: [0, 180, 360],
+              }}
+              transition={{
+                duration: 2,
+                repeat: Number.POSITIVE_INFINITY,
+                ease: "easeInOut",
+              }}
+            />
+          ) : (
+            <Mic
+              className={cn(
+                "h-6 w-6",
+                _listening ? "text-foreground" : "text-primary-foreground"
+              )}
+            />
+          )}
+        </div>
+        <AnimatePresence mode="wait">
+          {_listening && (
+            <motion.div
+              initial={{ opacity: 0, width: 0, marginLeft: 0 }}
+              animate={{ opacity: 1, width: "9rem", marginLeft: 10 }}
+              exit={{ opacity: 0, width: 0, marginLeft: 0 }}
+              transition={{
+                duration: 0.4,
+              }}
+              className="flex items-center justify-center gap-2 overflow-hidden"
+            >
+              {/* Frequency Animation */}
+              <div className="flex items-center justify-center gap-1">
+                {[...Array(14)].map((_, i) => (
+                  <motion.div
+                    key={i}
+                    className={cn(
+                      "w-0.5 rounded-full",
+                      _listening ? "bg-primary" : "bg-primary-foreground"
+                    )}
+                    initial={{ height: 2 }}
+                    animate={{
+                      height: _listening
+                        ? [2, 5 + Math.random() * 14, 4 + Math.random() * 8, 2]
+                        : 2,
+                    }}
+                    transition={{
+                      duration: _listening ? 1 : 0.3,
+                      repeat: _listening ? Infinity : 0,
+                      delay: _listening ? i * 0.05 : 0,
+                      ease: "easeInOut",
+                    }}
+                  />
+                ))}
+              </div>
+              {/* Timer */}
+              <div
+                className={cn(
+                  "w-11 text-center text-xs",
+                  _listening
+                    ? "text-muted-foreground"
+                    : "text-primary-foreground/80"
+                )}
+              >
+                {formatTime(_time)}
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </motion.div>
+    </div>
+  )
+}
