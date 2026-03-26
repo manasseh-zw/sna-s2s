@@ -21,12 +21,10 @@ export function VoiceInput({
     let intervalId: NodeJS.Timeout
 
     if (_listening) {
-      onStart?.()
       intervalId = setInterval(() => {
         _setTime((t) => t + 1)
       }, 1000)
     } else {
-      onStop?.()
       _setTime(0)
     }
 
@@ -40,7 +38,12 @@ export function VoiceInput({
   }
 
   const onClickHandler = () => {
-    _setListening(!_listening)
+    _setListening((current) => {
+      const next = !current
+      if (next) onStart?.()
+      else onStop?.()
+      return next
+    })
   }
 
   return (
