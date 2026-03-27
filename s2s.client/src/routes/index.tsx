@@ -3,6 +3,8 @@ import { TextEffect } from "@/components/ui/text-effect"
 import { TextShimmer } from "@/components/ui/text-shimmer"
 import { VoiceInput } from "@/components/voice-input"
 import { ScrollingWaveform, StaticWaveform } from "@/components/ui/waveform"
+import { transcribeAudio } from "@/lib/actions/asr"
+import { synthesizeSpeech } from "@/lib/actions/tts"
 import { createFileRoute } from "@tanstack/react-router"
 import { ArrowLeftRight, Mic, Play, RotateCcw, Volume2 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
@@ -11,38 +13,86 @@ export const Route = createFileRoute("/")({ component: App })
 
 function App() {
   const [asrState, setAsrState] = useState<
-    "idle" | "listening" | "transcribing" | "done"
+    "idle" | "listening" | "transcribing" | "done" | "error"
   >("idle")
   const [transcript, setTranscript] = useState("")
-  const transcriptionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  )
+  const [asrError, setAsrError] = useState("")
 
   const [ttsText, setTtsText] = useState("")
-
-  const [ttsPhase, setTtsPhase] = useState<
-    "idle" | "processing" | "result"
-  >("idle")
+  const [ttsPhase, setTtsPhase] = useState<"idle" | "processing" | "result">(
+    "idle"
+  )
   const [ttsPlaying, setTtsPlaying] = useState(false)
   const [ttsSeed, setTtsSeed] = useState(42)
+  const [ttsError, setTtsError] = useState("")
 
-  const ttsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const audioRef = useRef<HTMLAudioElement | null>(null)
+  const audioBlobUrlRef = useRef<string | null>(null)
 
-  const startTts = () => {
+  // ── ASR ────────────────────────────────────────────────────────────────
+
+  const handleAsrStart = () => {
+    setTranscript("")
+    setAsrError("")
+    setAsrState("listening")
+  }
+
+  const handleAsrStop = async (blob: Blob) => {
+    setAsrState("transcribing")
+
+    try {
+      const formData = new FormData()
+      formData.append("file", blob, "recording.webm")
+
+      const text = await transcribeAudio({ data: formData })
+      setTranscript(text)
+      setAsrState("done")
+    } catch (err) {
+      setAsrError(err instanceof Error ? err.message : "Transcription failed.")
+      setAsrState("error")
+    }
+  }
+
+  const handleAsrReset = () => {
+    setTranscript("")
+    setAsrError("")
+    setAsrState("idle")
+  }
+
+  // ── TTS ────────────────────────────────────────────────────────────────
+
+  const startTts = async () => {
     if (ttsPhase === "processing") return
     if (!ttsText.trim()) return
 
-    if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current)
-
+    setTtsError("")
     setTtsPlaying(false)
     setTtsPhase("processing")
 
-    // Placeholder for the upcoming TTS API call.
-    ttsTimerRef.current = setTimeout(() => {
+    // Revoke previous blob URL to avoid memory leaks
+    if (audioBlobUrlRef.current) {
+      URL.revokeObjectURL(audioBlobUrlRef.current)
+      audioBlobUrlRef.current = null
+    }
+
+    try {
+      const base64 = await synthesizeSpeech({ data: { text: ttsText } })
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
+      const wavBlob = new Blob([bytes], { type: "audio/wav" })
+      const url = URL.createObjectURL(wavBlob)
+      audioBlobUrlRef.current = url
+
+      if (audioRef.current) {
+        audioRef.current.src = url
+        audioRef.current.load()
+      }
+
       setTtsSeed((s) => s + 1)
       setTtsPhase("result")
-    }, 1600)
+    } catch (err) {
+      setTtsError(err instanceof Error ? err.message : "Synthesis failed.")
+      setTtsPhase("idle")
+    }
   }
 
   const handleTtsSend = (e: React.FormEvent) => {
@@ -52,62 +102,22 @@ function App() {
 
   const handleTtsPlay = () => {
     if (ttsPhase !== "result") return
-
-    setTtsPlaying(true)
     const audio = audioRef.current
-    if (audio) {
-      audio.currentTime = 0
-      audio
-        .play()
-        .catch(() => setTtsPlaying(false))
-    }
+    if (!audio) return
+    setTtsPlaying(true)
+    audio.currentTime = 0
+    audio.play().catch(() => setTtsPlaying(false))
   }
 
   const handleTtsRedo = () => {
-    if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current)
     audioRef.current?.pause()
     if (audioRef.current) audioRef.current.currentTime = 0
     setTtsPlaying(false)
+    setTtsError("")
     setTtsPhase("idle")
   }
 
-  const handleAsrStart = () => {
-    if (transcriptionTimerRef.current)
-      clearTimeout(transcriptionTimerRef.current)
-    setTranscript("")
-    setAsrState("listening")
-  }
-
-  const handleAsrStop = () => {
-    setAsrState("transcribing")
-    transcriptionTimerRef.current = setTimeout(() => {
-      setTranscript(
-        "This is placeholder output text from your speech recording."
-      )
-      setAsrState("done")
-    }, 1800)
-  }
-
-  const handleAsrReset = () => {
-    if (transcriptionTimerRef.current)
-      clearTimeout(transcriptionTimerRef.current)
-    setTranscript("")
-    setAsrState("idle")
-  }
-
-  useEffect(() => {
-    return () => {
-      if (transcriptionTimerRef.current)
-        clearTimeout(transcriptionTimerRef.current)
-    }
-  }, [])
-
-  useEffect(() => {
-    return () => {
-      if (ttsTimerRef.current) clearTimeout(ttsTimerRef.current)
-      audioRef.current?.pause()
-    }
-  }, [])
+  // ── Cleanup ────────────────────────────────────────────────────────────
 
   useEffect(() => {
     const audio = audioRef.current
@@ -115,6 +125,12 @@ function App() {
     const onEnded = () => setTtsPlaying(false)
     audio.addEventListener("ended", onEnded)
     return () => audio.removeEventListener("ended", onEnded)
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      if (audioBlobUrlRef.current) URL.revokeObjectURL(audioBlobUrlRef.current)
+    }
   }, [])
 
   return (
@@ -144,6 +160,7 @@ function App() {
           </TabsTab>
         </TabsList>
 
+        {/* ── ASR Panel ─────────────────────────────────────────────────── */}
         <TabsPanel
           className="flex min-h-[60vh] w-full flex-col items-center justify-center gap-8 px-6"
           value="asr"
@@ -176,51 +193,70 @@ function App() {
               </button>
             </>
           )}
+          {asrState === "error" && (
+            <div className="flex flex-col items-center gap-4 text-center">
+              <p className="text-sm text-red-500">{asrError}</p>
+              <button
+                className="inline-flex h-12 w-12 items-center justify-center rounded-full border border-stone-200 text-foreground transition-colors hover:bg-muted"
+                onClick={handleAsrReset}
+                type="button"
+              >
+                <RotateCcw className="h-5 w-5" />
+              </button>
+            </div>
+          )}
         </TabsPanel>
 
+        {/* ── TTS Panel ─────────────────────────────────────────────────── */}
         <TabsPanel
           className="flex min-h-[60vh] items-center justify-center px-6"
           value="tts"
         >
-          <audio ref={audioRef} src="/audio.wav" />
+          {/* eslint-disable-next-line jsx-a11y/media-has-caption */}
+          <audio ref={audioRef} />
           {ttsPhase !== "result" ? (
-            <form
-              onSubmit={handleTtsSend}
-              className="relative w-full max-w-lg rounded-2xl border border-stone-200/70 bg-background p-4"
-            >
-              <textarea
-                value={ttsText}
-                onChange={(e) => setTtsText(e.target.value)}
-                placeholder="nyora zvaunoda kunzwa"
-                disabled={ttsPhase === "processing"}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault()
-                    startTts()
-                  }
-                }}
-                className="h-28 w-full resize-none rounded-xl bg-transparent p-3 text-base outline-none placeholder:text-muted-foreground disabled:opacity-60 disabled:cursor-not-allowed"
-              />
-
-              <button
-                type="submit"
-                disabled={ttsPhase === "processing"}
-                className="absolute right-3 bottom-3 inline-flex h-10 w-10 items-center justify-center overflow-hidden rounded-full border border-primary/20 bg-transparent text-foreground disabled:opacity-60 disabled:cursor-not-allowed"
+            <div className="flex w-full max-w-lg flex-col gap-3">
+              <form
+                onSubmit={handleTtsSend}
+                className="relative w-full rounded-2xl border border-stone-200/70 bg-background p-4"
               >
-                <span
-                  aria-hidden="true"
-                  className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(205,175,250,1),transparent_50%),radial-gradient(ellipse_at_bottom_right,rgba(129,169,248,1),transparent_50%),radial-gradient(ellipse_at_top_left,rgba(247,203,191,1),transparent_50%),radial-gradient(ellipse_at_bottom_left,rgba(164,252,245,1),transparent_50%)]"
+                <textarea
+                  value={ttsText}
+                  onChange={(e) => setTtsText(e.target.value)}
+                  placeholder="nyora zvaunoda kunzwa"
+                  disabled={ttsPhase === "processing"}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault()
+                      startTts()
+                    }
+                  }}
+                  className="h-28 w-full resize-none rounded-xl bg-transparent p-3 text-base outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
                 />
-                {ttsPhase === "processing" ? (
+
+                <button
+                  type="submit"
+                  disabled={ttsPhase === "processing"}
+                  className="absolute right-3 bottom-3 inline-flex h-10 w-10 items-center justify-center overflow-hidden rounded-full border border-primary/20 bg-transparent text-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                >
                   <span
-                    aria-label="Processing"
-                    className="relative inline-block h-4 w-4 animate-spin rounded-full border-2 border-foreground/30 border-t-foreground"
+                    aria-hidden="true"
+                    className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(205,175,250,1),transparent_50%),radial-gradient(ellipse_at_bottom_right,rgba(129,169,248,1),transparent_50%),radial-gradient(ellipse_at_top_left,rgba(247,203,191,1),transparent_50%),radial-gradient(ellipse_at_bottom_left,rgba(164,252,245,1),transparent_50%)]"
                   />
-                ) : (
-                  <Volume2 className="relative h-5 w-5" />
-                )}
-              </button>
-            </form>
+                  {ttsPhase === "processing" ? (
+                    <span
+                      aria-label="Processing"
+                      className="relative inline-block h-4 w-4 animate-spin rounded-full border-2 border-foreground/30 border-t-foreground"
+                    />
+                  ) : (
+                    <Volume2 className="relative h-5 w-5" />
+                  )}
+                </button>
+              </form>
+              {ttsError && (
+                <p className="text-center text-sm text-red-500">{ttsError}</p>
+              )}
+            </div>
           ) : (
             <div className="flex w-full max-w-lg flex-col items-center justify-center gap-6">
               <div className="w-full">

@@ -6,7 +6,7 @@ import { cn } from "@/lib/utils"
 
 interface VoiceInputProps {
   onStart?: () => void
-  onStop?: () => void
+  onStop?: (blob: Blob) => void
 }
 
 export function VoiceInput({
@@ -16,6 +16,9 @@ export function VoiceInput({
 }: React.ComponentProps<"div"> & VoiceInputProps) {
   const [_listening, _setListening] = React.useState<boolean>(false)
   const [_time, _setTime] = React.useState<number>(0)
+
+  const mediaRecorderRef = React.useRef<MediaRecorder | null>(null)
+  const chunksRef = React.useRef<BlobPart[]>([])
 
   React.useEffect(() => {
     let intervalId: NodeJS.Timeout
@@ -37,13 +40,44 @@ export function VoiceInput({
     return `${mins.toString().padStart(2, "0")}:${secs.toString().padStart(2, "0")}`
   }
 
+  const startRecording = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const recorder = new MediaRecorder(stream)
+      chunksRef.current = []
+
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) chunksRef.current.push(e.data)
+      }
+
+      recorder.onstop = () => {
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" })
+        // Stop all tracks so the mic indicator goes away
+        stream.getTracks().forEach((t) => t.stop())
+        onStop?.(blob)
+      }
+
+      recorder.start()
+      mediaRecorderRef.current = recorder
+      _setListening(true)
+      onStart?.()
+    } catch {
+      console.error("Microphone access denied or unavailable.")
+    }
+  }
+
+  const stopRecording = () => {
+    mediaRecorderRef.current?.stop()
+    mediaRecorderRef.current = null
+    _setListening(false)
+  }
+
   const onClickHandler = () => {
-    _setListening((current) => {
-      const next = !current
-      if (next) onStart?.()
-      else onStop?.()
-      return next
-    })
+    if (_listening) {
+      stopRecording()
+    } else {
+      startRecording()
+    }
   }
 
   return (

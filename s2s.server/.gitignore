@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environment (uv)
+.venv/
+venv/
+
+# uv
+.python-version
+
+# Torch / HuggingFace caches
+*.bin
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.pkl
+*.npy
+*.npz
+
+# Audio outputs
+outputs/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.webm
+
+# Temp files
+tmp/
+*.tmp
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
