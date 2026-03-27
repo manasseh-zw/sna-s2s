@@ -1,8 +1,9 @@
+import ShaderOrb from "@/components/shader-orb"
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs"
 import { TextEffect } from "@/components/ui/text-effect"
 import { TextShimmer } from "@/components/ui/text-shimmer"
-import { VoiceInput } from "@/components/voice-input"
 import { ScrollingWaveform, StaticWaveform } from "@/components/ui/waveform"
+import { VoiceInput } from "@/components/voice-input"
 import { transcribeAudio } from "@/lib/actions/asr"
 import { synthesizeSpeech } from "@/lib/actions/tts"
 import { createFileRoute } from "@tanstack/react-router"
@@ -314,11 +315,18 @@ function App() {
           )}
         </TabsPanel>
 
-        <TabsPanel className="pt-8" value="s2s">
-          <p className="text-center text-xs text-muted-foreground">
-            <span aria-hidden="true">🎧 </span>
-            Speech-to-Speech placeholder.
-          </p>
+        <TabsPanel
+          className="flex min-h-[60vh] items-center justify-center pt-8"
+          value="s2s"
+        >
+          <ShaderOrb
+            color={{
+              main: "#EDE7FF",
+              low: "#85AFFF",
+              mid: "#CDAFFA",
+              high: "#A4FCF5",
+            }}
+          />
         </TabsPanel>
       </Tabs>
     </div>
