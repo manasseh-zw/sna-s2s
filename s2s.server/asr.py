@@ -1,13 +1,10 @@
 """ASR engine wrapping the noirlab-whisper-shona model."""
 
-import io
-import tempfile
+import subprocess
 from pathlib import Path
 
 import numpy as np
-import soundfile as sf
 import torch
-from scipy.signal import resample_poly
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 
 DEFAULT_ASR_MODEL_PATH = Path("/Users/manasseh/models/shona/noirlab-whisper-shona")
@@ -54,27 +51,35 @@ class ASREngine:
         language: str = "shona",
         task: str = "transcribe",
     ) -> str:
-        """Transcribe raw audio bytes and return the transcript string."""
+        """Transcribe raw audio bytes (any browser format) and return the transcript."""
         target_sr: int = self._processor.feature_extractor.sampling_rate
 
-        # Write to a temp file so soundfile can detect the format
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            tmp.write(audio_bytes)
-            tmp_path = tmp.name
+        # Use ffmpeg to decode any incoming format (webm, ogg, mp4, wav…) into
+        # raw 32-bit float PCM at the model's expected sample rate.
+        ffmpeg = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner", "-loglevel", "error",
+                "-i", "pipe:0",                  # read from stdin
+                "-ac", "1",                       # mono
+                "-ar", str(target_sr),            # resample to target SR
+                "-f", "f32le",                    # raw float32 little-endian
+                "pipe:1",                         # write to stdout
+            ],
+            input=audio_bytes,
+            capture_output=True,
+        )
 
-        audio, sr = sf.read(tmp_path, dtype="float32")
+        if ffmpeg.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg failed: {ffmpeg.stderr.decode(errors='replace')}"
+            )
 
-        # Mix down to mono
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-
-        # Resample if needed
-        if sr != target_sr:
-            audio = resample_poly(audio, target_sr, sr).astype(np.float32)
-            sr = target_sr
+        audio = np.frombuffer(ffmpeg.stdout, dtype=np.float32)
 
         result = self._pipe(
-            {"raw": audio, "sampling_rate": sr},
+            {"raw": audio, "sampling_rate": target_sr},
             generate_kwargs={"language": language, "task": task},
         )
         return result["text"].strip()
+
