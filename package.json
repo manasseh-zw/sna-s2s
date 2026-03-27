@@ -1,0 +1,13 @@
+{
+  "name": "sna-s2s",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" \"bun run dev:server\" \"bun run dev:client\"",
+    "dev:server": "cd s2s.server && uv run uvicorn main:app --reload --port 8000",
+    "dev:client": "cd s2s.client && bun run dev",
+    "start": "bun run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
