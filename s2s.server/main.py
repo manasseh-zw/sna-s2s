@@ -26,9 +26,9 @@ state = _AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Loading ASR engine…")
+    print("Loading ASR engines (Whisper + Wav2Vec2-BERT)…")
     state.asr = ASREngine()
-    print("ASR engine ready.")
+    print("ASR engines ready.")
 
     print("Loading TTS engine…")
     state.tts = TTSEngine()
@@ -59,13 +59,13 @@ class TTSRequest(BaseModel):
 
 @app.post("/asr")
 async def asr_endpoint(file: UploadFile = File(...)):
-    """Transcribe an uploaded audio file and return the Shona transcript."""
+    """Transcribe with Wav2Vec2-BERT CTC (fast, Shona fine-tuned)."""
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio file.")
 
     try:
-        text = state.asr.transcribe(audio_bytes)
+        text = state.asr.transcribe_w2v(audio_bytes)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

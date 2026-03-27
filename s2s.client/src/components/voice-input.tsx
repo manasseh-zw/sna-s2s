@@ -45,15 +45,18 @@ export function VoiceInput({
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
       const recorder = new MediaRecorder(stream)
       chunksRef.current = []
+      const startedAt = Date.now()
 
       recorder.ondataavailable = (e) => {
         if (e.data.size > 0) chunksRef.current.push(e.data)
       }
 
       recorder.onstop = () => {
-        const blob = new Blob(chunksRef.current, { type: "audio/webm" })
-        // Stop all tracks so the mic indicator goes away
         stream.getTracks().forEach((t) => t.stop())
+        const duration = Date.now() - startedAt
+        // Ignore recordings shorter than 500ms — too short to contain speech
+        if (duration < 500) return
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" })
         onStop?.(blob)
       }
 
