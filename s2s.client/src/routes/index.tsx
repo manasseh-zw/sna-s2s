@@ -1,4 +1,4 @@
-import ShaderOrb from "@/components/shader-orb"
+import { S2SPanel } from "@/components/s2s-panel"
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs"
 import { TextEffect } from "@/components/ui/text-effect"
 import { TextShimmer } from "@/components/ui/text-shimmer"
@@ -7,10 +7,10 @@ import { VoiceInput } from "@/components/voice-input"
 import { transcribeAudio } from "@/lib/actions/asr"
 import { synthesizeSpeech } from "@/lib/actions/tts"
 import { createFileRoute } from "@tanstack/react-router"
-import { ArrowLeftRight, Mic, Play, RotateCcw, Volume2 } from "lucide-react"
+import { ArrowLeftRight, Mic, Play, RotateCcw, Upload, Volume2 } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
-export const Route = createFileRoute("/")({ component: App })
+export const Route = createFileRoute("/")({ component: App, ssr: false })
 
 function App() {
   const [asrState, setAsrState] = useState<
@@ -18,6 +18,8 @@ function App() {
   >("idle")
   const [transcript, setTranscript] = useState("")
   const [asrError, setAsrError] = useState("")
+  const [isUploading, setIsUploading] = useState(false)
+  const uploadInputRef = useRef<HTMLInputElement | null>(null)
 
   const [ttsText, setTtsText] = useState("")
   const [ttsPhase, setTtsPhase] = useState<"idle" | "processing" | "result">(
@@ -58,6 +60,35 @@ function App() {
     setTranscript("")
     setAsrError("")
     setAsrState("idle")
+  }
+
+  const handleUploadClick = () => {
+    uploadInputRef.current?.click()
+  }
+
+  const handleAsrUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    setIsUploading(true)
+    setAsrError("")
+    setTranscript("")
+    setAsrState("transcribing")
+
+    try {
+      const formData = new FormData()
+      formData.append("file", file, file.name || "upload.mp3")
+
+      const text = await transcribeAudio({ data: formData })
+      setTranscript(text)
+      setAsrState("done")
+    } catch (err) {
+      setAsrError(err instanceof Error ? err.message : "Upload transcription failed.")
+      setAsrState("error")
+    } finally {
+      setIsUploading(false)
+      event.target.value = ""
+    }
   }
 
   // ── TTS ────────────────────────────────────────────────────────────────
@@ -166,8 +197,26 @@ function App() {
           className="flex min-h-[60vh] w-full flex-col items-center justify-center gap-8 px-6"
           value="asr"
         >
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept=".mp3,audio/mpeg"
+            className="hidden"
+            onChange={handleAsrUpload}
+          />
           {(asrState === "idle" || asrState === "listening") && (
-            <VoiceInput onStart={handleAsrStart} onStop={handleAsrStop} />
+            <div className="flex flex-col items-center gap-3">
+              <VoiceInput onStart={handleAsrStart} onStop={handleAsrStop} />
+              <button
+                type="button"
+                onClick={handleUploadClick}
+                disabled={isUploading}
+                className="inline-flex h-10 items-center justify-center gap-2 rounded-full border border-stone-200 px-4 text-sm text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <Upload className="h-4 w-4" />
+                Upload
+              </button>
+            </div>
           )}
           {asrState === "transcribing" && (
             <div className="text-center">
@@ -183,7 +232,7 @@ function App() {
                 per="word"
                 preset="fade"
               >
-                {transcript}
+                {transcript || "No speech detected."}
               </TextEffect>
               <button
                 className="inline-flex h-12 w-12 items-center justify-center rounded-full border border-stone-200 text-foreground transition-colors hover:bg-muted"
@@ -316,17 +365,10 @@ function App() {
         </TabsPanel>
 
         <TabsPanel
-          className="flex min-h-[60vh] items-center justify-center pt-8"
+          className="flex min-h-[60vh] items-center justify-center pt-8 pb-10"
           value="s2s"
         >
-          <ShaderOrb
-            color={{
-              main: "#EDE7FF",
-              low: "#85AFFF",
-              mid: "#CDAFFA",
-              high: "#A4FCF5",
-            }}
-          />
+          <S2SPanel />
         </TabsPanel>
       </Tabs>
     </div>

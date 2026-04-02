@@ -1,22 +1,17 @@
-"""ASR engine – Whisper Large v3 + Wav2Vec2-BERT (CTC) for Shona."""
+"""ASR engine – Wav2Vec2-BERT (CTC) for Shona."""
 
 import subprocess
 from pathlib import Path
 
 import numpy as np
 import torch
-from transformers import (
-    AutoModelForSpeechSeq2Seq,
-    AutoProcessor,
-    Wav2Vec2BertForCTC,
-    Wav2Vec2BertProcessor,
-    pipeline,
-)
+from transformers import Wav2Vec2BertForCTC, Wav2Vec2BertProcessor
 
-DEFAULT_WHISPER_PATH = Path("/Users/manasseh/models/shona/noirlab-whisper-shona")
 DEFAULT_W2V_PATH = Path("/Users/manasseh/models/shona/w2v-bert-sna")
 
-_SAMPLE_RATE = 16_000  # both models expect 16 kHz
+_SAMPLE_RATE = 16_000  # model expects 16 kHz
+_CHUNK_SECONDS = 25  # process audio in 25-second chunks to avoid OOM
+_CHUNK_SAMPLES = _CHUNK_SECONDS * _SAMPLE_RATE
 
 
 def _decode_audio(audio_bytes: bytes, target_sr: int = _SAMPLE_RATE) -> np.ndarray:
@@ -40,19 +35,14 @@ def _decode_audio(audio_bytes: bytes, target_sr: int = _SAMPLE_RATE) -> np.ndarr
 
 
 def _is_silent(audio: np.ndarray, threshold: float = 1e-4) -> bool:
-    """Return True if the clip is effectively silence (avoids Whisper hallucinations)."""
+    """Return True if the clip is effectively silence."""
     return float(np.sqrt(np.mean(audio ** 2))) < threshold
 
 
 class ASREngine:
-    """Hosts both Whisper and Wav2Vec2-BERT engines. Call the one you want."""
+    """Wav2Vec2-BERT CTC engine for Shona speech recognition."""
 
-    def __init__(
-        self,
-        whisper_path: Path = DEFAULT_WHISPER_PATH,
-        w2v_path: Path = DEFAULT_W2V_PATH,
-    ) -> None:
-        # ── Device selection ────────────────────────────────────────────────
+    def __init__(self, w2v_path: Path = DEFAULT_W2V_PATH) -> None:
         if torch.cuda.is_available():
             self._device = "cuda:0"
             self._dtype = torch.float16
@@ -63,82 +53,58 @@ class ASREngine:
             self._device = "cpu"
             self._dtype = torch.float32
 
-        # ── Whisper Large v3 ────────────────────────────────────────────────
-        print(f"  Loading Whisper from {whisper_path} …")
-        if not whisper_path.exists():
-            raise FileNotFoundError(f"Whisper model not found: {whisper_path}")
-
-        _w_model = AutoModelForSpeechSeq2Seq.from_pretrained(
-            str(whisper_path),
-            dtype=self._dtype,
-            low_cpu_mem_usage=True,
-            attn_implementation="eager",
-        ).to(self._device).eval()
-
-        self._w_processor = AutoProcessor.from_pretrained(str(whisper_path))
-
-        self._whisper_pipe = pipeline(
-            "automatic-speech-recognition",
-            model=_w_model,
-            tokenizer=self._w_processor.tokenizer,
-            feature_extractor=self._w_processor.feature_extractor,
-            dtype=self._dtype,
-            device=self._device,
-        )
-
-        # ── Wav2Vec2-BERT (CTC) ─────────────────────────────────────────────
         print(f"  Loading Wav2Vec2-BERT from {w2v_path} …")
         if not w2v_path.exists():
             raise FileNotFoundError(f"Wav2Vec2-BERT model not found: {w2v_path}")
 
-        self._w2v_processor = Wav2Vec2BertProcessor.from_pretrained(str(w2v_path))
-        self._w2v_model = (
-            Wav2Vec2BertForCTC.from_pretrained(str(w2v_path))
+        self._processor = Wav2Vec2BertProcessor.from_pretrained(str(w2v_path))
+        self._model = (
+            Wav2Vec2BertForCTC.from_pretrained(
+                str(w2v_path), torch_dtype=self._dtype,
+            )
             .to(self._device)
             .eval()
         )
 
-    # ── Public API ──────────────────────────────────────────────────────────
-
-    def transcribe(
-        self,
-        audio_bytes: bytes,
-        language: str = "shona",
-        task: str = "transcribe",
-    ) -> str:
-        """Transcribe with Whisper Large v3 (highest accuracy)."""
-        audio = _decode_audio(audio_bytes)
-        if _is_silent(audio):
-            return ""
-
-        result = self._whisper_pipe(
-            {"raw": audio, "sampling_rate": _SAMPLE_RATE},
-            generate_kwargs={
-                "language": language,
-                "task": task,
-                "max_new_tokens": 224,
-            },
-        )
-        return result["text"].strip()
-
-    def transcribe_w2v(self, audio_bytes: bytes) -> str:
-        """Transcribe with Wav2Vec2-BERT CTC (faster, Shona fine-tuned)."""
-        audio = _decode_audio(audio_bytes)
-        if _is_silent(audio):
-            return ""
-
-        inputs = self._w2v_processor(
+    def _transcribe_chunk(self, audio: np.ndarray) -> str:
+        """Transcribe a single audio chunk that fits in memory."""
+        inputs = self._processor(
             audio,
             sampling_rate=_SAMPLE_RATE,
             return_tensors="pt",
             padding=True,
         )
-        # Move all tensors to device
-        inputs = {k: v.to(self._device) for k, v in inputs.items()}
+        inputs = {
+            k: v.to(device=self._device, dtype=self._dtype if v.is_floating_point() else None)
+            for k, v in inputs.items()
+        }
 
         with torch.inference_mode():
-            logits = self._w2v_model(**inputs).logits
+            logits = self._model(**inputs).logits
 
         predicted_ids = torch.argmax(logits, dim=-1)
-        transcription = self._w2v_processor.batch_decode(predicted_ids)
+        transcription = self._processor.batch_decode(predicted_ids)
         return transcription[0].strip()
+
+    def transcribe(self, audio_bytes: bytes) -> str:
+        """Transcribe with Wav2Vec2-BERT CTC (Shona fine-tuned).
+
+        Long audio is split into chunks to avoid OOM on the attention matrices.
+        """
+        audio = _decode_audio(audio_bytes)
+        if _is_silent(audio):
+            return ""
+
+        if len(audio) <= _CHUNK_SAMPLES:
+            return self._transcribe_chunk(audio)
+
+        parts: list[str] = []
+        for start in range(0, len(audio), _CHUNK_SAMPLES):
+            chunk = audio[start : start + _CHUNK_SAMPLES]
+            if _is_silent(chunk):
+                continue
+            text = self._transcribe_chunk(chunk)
+            if text:
+                parts.append(text)
+
+        return " ".join(parts)

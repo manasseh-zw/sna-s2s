@@ -13,4 +13,7 @@ dependencies = [
     "numpy",
     "scipy",
     "soundfile",
+    "openai>=2.30.0",
+    "google-genai>=1.68.0",
+    "python-dotenv>=1.2.2",
 ]

@@ -14,5 +14,5 @@ export const transcribeAudio = createServerFn({ method: "POST" })
     }
 
     const json = await res.json()
-    return json.text as string
+    return (json.text as string) ?? ""
   })
