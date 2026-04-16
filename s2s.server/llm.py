@@ -8,8 +8,9 @@ from google import genai
 from google.genai import types
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
+DEFAULT_LIVE_MODEL = "models/gemini-3.1-flash-live-preview"
 
-_SYSTEM_PROMPT = (
+SYSTEM_PROMPT = (
     "Iwe uri mubatsiri anopindura nechiShona chakareruka chete. "
     "Usashandise Chirungu. Usashandise manhamba kana digit. "
     "Mhinduro ngadzive pfupi, asi dzinogona kuwedzera zvishoma kana mubvunzo wada kutsanangurwa. "
@@ -18,17 +19,47 @@ _SYSTEM_PROMPT = (
 )
 
 
+def create_gemini_client() -> genai.Client:
+    """Create an authenticated Gemini client from environment variables."""
+    load_dotenv()
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY is not set.")
+
+    return genai.Client(
+        api_key=api_key,
+        http_options={"api_version": "v1beta"},
+    )
+
+
+def create_live_connect_config() -> types.LiveConnectConfig:
+    """Build the Live API config used by the realtime S2S bridge."""
+    return types.LiveConnectConfig(
+        response_modalities=["TEXT"],
+        system_instruction=SYSTEM_PROMPT,
+        temperature=0.6,
+        max_output_tokens=140,
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                disabled=False,
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_LOW,
+                prefix_padding_ms=220,
+                silence_duration_ms=700,
+            ),
+            activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+            turn_coverage=types.TurnCoverage.TURN_INCLUDES_ONLY_ACTIVITY,
+        ),
+    )
+
+
 class LLMClient:
     """Calls Gemini model directly via google-genai SDK."""
 
     def __init__(self, model: str = DEFAULT_MODEL) -> None:
-        load_dotenv()
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY is not set.")
-
         self._model = model
-        self._client = genai.Client(api_key=api_key)
+        self._client = create_gemini_client()
         self._history: list[types.Content] = []
 
     def respond(self, text: str, *, maintain_context: bool = True) -> str:
@@ -44,7 +75,7 @@ class LLMClient:
         contents.append(user_content)
 
         config = types.GenerateContentConfig(
-            system_instruction=_SYSTEM_PROMPT,
+            system_instruction=SYSTEM_PROMPT,
             temperature=0.6,
             max_output_tokens=140,
             thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),

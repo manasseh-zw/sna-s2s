@@ -1,43 +1,49 @@
-
 import ShaderOrb, { type AIOrbState } from "@/components/shader-orb"
-import { speechToSpeech } from "@/lib/actions/s2s"
-import { resetConversation } from "@/lib/actions/s2s-reset"
-import { useMicVAD, utils } from "@ricky0123/vad-react"
 import { AnimatePresence, motion } from "motion/react"
 import { Mic, PhoneOff } from "lucide-react"
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 
-// ── Types ─────────────────────────────────────────────────────────────────────
-
-type S2SPhase = "idle" | "listening" | "processing" | "speaking"
+type S2SPhase =
+  | "idle"
+  | "connecting"
+  | "listening"
+  | "processing"
+  | "speaking"
 
 interface Turn {
   transcript: string
   reply: string
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+type LiveServerEvent =
+  | { type: "ready" }
+  | { type: "voice_activity_start" }
+  | { type: "voice_activity_end" }
+  | { type: "transcript_partial"; text: string; finished?: boolean }
+  | { type: "reply_partial"; text: string }
+  | { type: "turn_complete"; transcript: string; reply: string; wav_base64: string }
+  | { type: "error"; message: string }
 
-/** Map pipeline phase → ShaderOrb state */
 function toOrbState(phase: S2SPhase): AIOrbState {
   if (phase === "listening") return "listening"
   if (phase === "processing" || phase === "speaking") return "responding"
   return "idle"
 }
 
-/** Status label shown below the orb */
 function statusLabel(phase: S2SPhase, conversationActive: boolean): string {
-  if (!conversationActive) return "Dzvanya Taura"
+  if (!conversationActive) return "Dzvanya Taura Live"
 
   switch (phase) {
     case "idle":
-      return "Taura"
+      return "Ndakamirira"
+    case "connecting":
+      return "Ndiri kubatana..."
     case "listening":
       return "Ndinonzwa..."
     case "processing":
       return "Ndichifunga..."
     case "speaking":
-      return "..."
+      return "Ndiri kupindura..."
   }
 }
 
@@ -56,30 +62,58 @@ function describeMicError(raw: string): string {
   if (message.includes("securityerror") || message.includes("insecure")) {
     return "Microphone access requires a secure origin (localhost or HTTPS)."
   }
-  if (message.includes("null stream") || message.includes("audio context") || message.includes("processor adapter")) {
-    return "Mic init yakundikana. Dzvanya Taura zvakare kuti tiedze zvakare."
-  }
 
   return raw
 }
 
-function hasEnoughSpeech(audio: Float32Array): boolean {
-  const minSamples = 16000 * 0.45
-  if (audio.length < minSamples) return false
+function downsampleToPcm(
+  input: Float32Array,
+  inputSampleRate: number,
+  outputSampleRate = 16000
+): Int16Array {
+  if (!input.length) return new Int16Array(0)
 
-  let sumSquares = 0
-  let peak = 0
-  for (let i = 0; i < audio.length; i += 1) {
-    const v = Math.abs(audio[i] ?? 0)
-    sumSquares += v * v
-    if (v > peak) peak = v
+  if (inputSampleRate === outputSampleRate) {
+    const pcm = new Int16Array(input.length)
+    for (let i = 0; i < input.length; i += 1) {
+      const sample = Math.max(-1, Math.min(1, input[i] ?? 0))
+      pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff
+    }
+    return pcm
   }
 
-  const rms = Math.sqrt(sumSquares / audio.length)
-  return rms > 0.008 || peak > 0.04
+  const ratio = inputSampleRate / outputSampleRate
+  const outputLength = Math.max(1, Math.round(input.length / ratio))
+  const pcm = new Int16Array(outputLength)
+
+  let inputOffset = 0
+  for (let outputIndex = 0; outputIndex < outputLength; outputIndex += 1) {
+    const nextInputOffset = Math.min(
+      input.length,
+      Math.round((outputIndex + 1) * ratio)
+    )
+
+    let total = 0
+    let count = 0
+    for (let i = inputOffset; i < nextInputOffset; i += 1) {
+      total += input[i] ?? 0
+      count += 1
+    }
+
+    const sample = count > 0 ? total / count : 0
+    const clamped = Math.max(-1, Math.min(1, sample))
+    pcm[outputIndex] = clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff
+    inputOffset = nextInputOffset
+  }
+
+  return pcm
 }
 
-// ── Component ─────────────────────────────────────────────────────────────────
+function createLiveSocketUrl(): string {
+  const protocol = window.location.protocol === "https:" ? "wss" : "ws"
+  const host = `${window.location.hostname}:8000`
+  return `${protocol}://${host}/s2s/live`
+}
 
 export function S2SPanel() {
   const [phase, setPhase] = useState<S2SPhase>("idle")
@@ -87,27 +121,34 @@ export function S2SPanel() {
   const [hasAttemptedStart, setHasAttemptedStart] = useState(false)
   const [activityLevel, setActivityLevel] = useState(0)
   const [turns, setTurns] = useState<Turn[]>([])
+  const [currentTranscript, setCurrentTranscript] = useState("")
+  const [currentReply, setCurrentReply] = useState("")
   const [error, setError] = useState("")
-  const [isResetting, setIsResetting] = useState(false)
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioBlobUrlRef = useRef<string | null>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const audioContextRef = useRef<AudioContext | null>(null)
+  const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null)
+  const processorRef = useRef<ScriptProcessorNode | null>(null)
+  const gainRef = useRef<GainNode | null>(null)
+  const socketRef = useRef<WebSocket | null>(null)
   const phaseRef = useRef<S2SPhase>("idle")
-  const activityRef = useRef(0)
-  const [vadModel, setVadModel] = useState<"legacy" | "v5">("legacy")
 
-  // Keep ref in sync so callbacks always see latest phase
   useEffect(() => {
     phaseRef.current = phase
   }, [phase])
 
-  // ── Audio element events ──────────────────────────────────────────────────
-
   useEffect(() => {
     const audio = new Audio()
     audioRef.current = audio
-    const onEnded = () => setPhase("idle")
+    const onEnded = () => {
+      if (conversationActive) {
+        setPhase("idle")
+      }
+    }
     audio.addEventListener("ended", onEnded)
+
     return () => {
       audio.removeEventListener("ended", onEnded)
       audio.pause()
@@ -115,212 +156,223 @@ export function S2SPanel() {
         URL.revokeObjectURL(audioBlobUrlRef.current)
       }
     }
-  }, [])
-
-  // ── speech-end handler ────────────────────────────────────────────────────
-
-  const onSpeechEnd = useCallback(
-    async (float32Audio: Float32Array) => {
-      // Guard: ignore if we're already processing or speaking
-      if (phaseRef.current !== "listening") return
-
-      if (!hasEnoughSpeech(float32Audio)) {
-        setError("Handina kunzwa kutaura. Dzvanya Taura, woedza zvakare.")
-        setActivityLevel(0)
-        activityRef.current = 0
-        setPhase("idle")
-        return
-      }
-
-      setPhase("processing")
-      setActivityLevel(0)
-      activityRef.current = 0
-      setError("")
-
-      try {
-        // Convert Float32Array (16 kHz PCM) → WAV Blob
-        const wavBuffer = utils.encodeWAV(float32Audio)
-        const wavBlob = new Blob([wavBuffer], { type: "audio/wav" })
-
-        const formData = new FormData()
-        formData.append("file", wavBlob, "speech.wav")
-
-        const { wavBase64, transcript, reply } = await speechToSpeech({
-          data: formData,
-        })
-
-        setTurns((prev) => [...prev, { transcript, reply }])
-
-        // Decode base64 WAV and play
-        const bytes = Uint8Array.from(atob(wavBase64), (c) => c.charCodeAt(0))
-        const outputBlob = new Blob([bytes], { type: "audio/wav" })
-
-        if (audioBlobUrlRef.current) {
-          URL.revokeObjectURL(audioBlobUrlRef.current)
-        }
-        const url = URL.createObjectURL(outputBlob)
-        audioBlobUrlRef.current = url
-
-        const audio = audioRef.current
-        if (audio) {
-          audio.src = url
-          audio.load()
-          setPhase("speaking")
-          audio.play().catch(() => setPhase("idle"))
-        } else {
-          setPhase("idle")
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : "Something went wrong."
-        if (message.includes("S2S server error 422") && message.toLowerCase().includes("no speech detected")) {
-          setError("Handina kunzwa kutaura. Dzvanya Taura, woedza zvakare.")
-        } else {
-          setError(message)
-        }
-        setPhase("idle")
-      }
-    },
-    [] // no deps needed — we read phase via ref
-  )
-
-  // ── VAD ──────────────────────────────────────────────────────────────────
-
-  const vad = useMicVAD({
-    startOnLoad: false,
-    model: vadModel,
-    getStream: async () => {
-      try {
-        return await navigator.mediaDevices.getUserMedia({
-          audio: {
-            channelCount: { ideal: 1 },
-            echoCancellation: { ideal: true },
-            noiseSuppression: { ideal: true },
-            autoGainControl: { ideal: true },
-          },
-        })
-      } catch {
-        // Fallback for browsers/devices that reject stricter constraints.
-        return navigator.mediaDevices.getUserMedia({ audio: true })
-      }
-    },
-    onSpeechStart: () => {
-      if (!conversationActive) return
-      // Only start listening if we're idle (not already processing/speaking)
-      if (phaseRef.current === "idle") {
-        setPhase("listening")
-        setError("")
-      }
-    },
-    onSpeechEnd,
-    onFrameProcessed: (probabilities) => {
-      // Drive the orb's activityLevel from voice probability
-      if (phaseRef.current === "listening") {
-        const raw = probabilities.isSpeech
-        const target = raw < 0.05 ? 0 : raw
-        const smoothed = activityRef.current * 0.82 + target * 0.18
-        activityRef.current = smoothed
-        setActivityLevel(smoothed)
-      }
-    },
-    // VAD assets are served from /public, while ORT runtime artifacts are loaded
-    // from onnxruntime-web's dist folder during dev.
-    baseAssetPath: "/",
-    onnxWASMBasePath: "/node_modules/onnxruntime-web/dist/",
-    ortConfig: (ort) => {
-      // Avoid threaded worker bootstrapping issues in local dev environments.
-      ort.env.wasm.numThreads = 1
-    },
-    // Silence threshold: ~700 ms quiet = speech end
-    positiveSpeechThreshold: 0.5,
-    negativeSpeechThreshold: 0.35,
-    redemptionMs: 700,
-    minSpeechMs: 150,
-    preSpeechPadMs: 300,
-  })
-
-  // ── Reset ─────────────────────────────────────────────────────────────────
+  }, [conversationActive])
 
   useEffect(() => {
-    if (!vad.errored) return
-    setConversationActive(false)
-    setPhase("idle")
+    return () => {
+      stopSession()
+    }
+  }, [])
+
+  const stopPlayback = () => {
+    audioRef.current?.pause()
+    if (audioRef.current) {
+      audioRef.current.currentTime = 0
+    }
+  }
+
+  const cleanupAudioGraph = () => {
+    processorRef.current?.disconnect()
+    sourceRef.current?.disconnect()
+    gainRef.current?.disconnect()
+    streamRef.current?.getTracks().forEach((track) => track.stop())
+    audioContextRef.current?.close().catch(() => undefined)
+
+    processorRef.current = null
+    sourceRef.current = null
+    gainRef.current = null
+    streamRef.current = null
+    audioContextRef.current = null
+  }
+
+  const stopSession = () => {
+    socketRef.current?.close()
+    socketRef.current = null
+    cleanupAudioGraph()
+    stopPlayback()
     setActivityLevel(0)
-    activityRef.current = 0
-  }, [vad.errored])
+  }
 
-  const handleStartConversation = async () => {
-    if (vad.loading || phase === "processing" || phase === "speaking") return
-    setHasAttemptedStart(true)
+  const playReply = (wavBase64: string) => {
+    const bytes = Uint8Array.from(atob(wavBase64), (char) => char.charCodeAt(0))
+    const outputBlob = new Blob([bytes], { type: "audio/wav" })
 
-    if (vad.errored) {
-      setError("")
-      setVadModel((prev) => (prev === "legacy" ? "v5" : "legacy"))
+    if (audioBlobUrlRef.current) {
+      URL.revokeObjectURL(audioBlobUrlRef.current)
+    }
+
+    const url = URL.createObjectURL(outputBlob)
+    audioBlobUrlRef.current = url
+
+    const audio = audioRef.current
+    if (!audio) {
+      setPhase("idle")
       return
     }
 
-    try {
-      setError("")
-      setPhase("idle")
-      await vad.start()
-      setConversationActive(true)
-    } catch (err) {
-      setConversationActive(false)
-      setError(err instanceof Error ? describeMicError(err.message) : "Kutadza kuvhura mic.")
+    audio.src = url
+    audio.load()
+    setPhase("speaking")
+    audio.play().catch(() => setPhase("idle"))
+  }
+
+  const handleServerEvent = (event: LiveServerEvent) => {
+    switch (event.type) {
+      case "ready":
+        setPhase("idle")
+        return
+      case "voice_activity_start":
+        stopPlayback()
+        setActivityLevel(1)
+        setPhase("listening")
+        return
+      case "voice_activity_end":
+        setActivityLevel(0.2)
+        if (phaseRef.current !== "speaking") {
+          setPhase("processing")
+        }
+        return
+      case "transcript_partial":
+        setCurrentTranscript(event.text)
+        return
+      case "reply_partial":
+        setCurrentReply(event.text)
+        setPhase("processing")
+        return
+      case "turn_complete":
+        setTurns((prev) => [
+          ...prev,
+          { transcript: event.transcript, reply: event.reply },
+        ])
+        setCurrentTranscript("")
+        setCurrentReply("")
+        playReply(event.wav_base64)
+        return
+      case "error":
+        setError(event.message)
+        setPhase("idle")
     }
   }
 
-  const handleEndConversation = async () => {
-    if (isResetting) return
-    setIsResetting(true)
-    try {
-      if (vad.listening) {
-        await vad.pause()
-      }
-      audioRef.current?.pause()
-      if (audioRef.current) audioRef.current.currentTime = 0
-      await resetConversation()
-      setConversationActive(false)
-      setTurns([])
-      setError("")
-      setActivityLevel(0)
-      activityRef.current = 0
-      setPhase("idle")
-    } catch {
-      setError("Kutadza kupedza hurukuro.")
-    } finally {
-      setIsResetting(false)
-    }
-  }
+  const handleStartConversation = async () => {
+    if (conversationActive || phase === "connecting") return
 
-  const handleRetryMic = () => {
-    setError("")
     setHasAttemptedStart(true)
-    setConversationActive(false)
-    setActivityLevel(0)
-    activityRef.current = 0
-    setPhase("idle")
-    setVadModel((prev) => (prev === "legacy" ? "v5" : "legacy"))
+    setError("")
+    setCurrentTranscript("")
+    setCurrentReply("")
+    setTurns([])
+    setPhase("connecting")
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: { ideal: 1 },
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
+        },
+      })
+
+      const socket = new WebSocket(createLiveSocketUrl())
+      socketRef.current = socket
+      streamRef.current = stream
+
+      socket.addEventListener("message", (message) => {
+        if (typeof message.data !== "string") return
+
+        try {
+          handleServerEvent(JSON.parse(message.data) as LiveServerEvent)
+        } catch {
+          setError("Live response rakundikana.")
+          setPhase("idle")
+        }
+      })
+
+      socket.addEventListener("close", () => {
+        cleanupAudioGraph()
+        socketRef.current = null
+        setConversationActive(false)
+        setActivityLevel(0)
+        if (phaseRef.current !== "idle") {
+          setPhase("idle")
+        }
+      })
+
+      socket.addEventListener("error", () => {
+        setError("Kubatana neLive API kwaramba.")
+        setPhase("idle")
+      })
+
+      await new Promise<void>((resolve, reject) => {
+        socket.addEventListener("open", () => resolve(), { once: true })
+        socket.addEventListener("error", () => reject(new Error("Socket open failed")), {
+          once: true,
+        })
+      })
+
+      const audioContext = new AudioContext()
+      await audioContext.resume()
+
+      const source = audioContext.createMediaStreamSource(stream)
+      const processor = audioContext.createScriptProcessor(4096, 1, 1)
+      const gain = audioContext.createGain()
+      gain.gain.value = 0
+
+      processor.onaudioprocess = (processEvent) => {
+        if (socket.readyState !== WebSocket.OPEN) return
+
+        const samples = processEvent.inputBuffer.getChannelData(0)
+        const pcm = downsampleToPcm(samples, audioContext.sampleRate)
+        if (pcm.byteLength > 0) {
+          socket.send(pcm.buffer)
+        }
+      }
+
+      source.connect(processor)
+      processor.connect(gain)
+      gain.connect(audioContext.destination)
+
+      audioContextRef.current = audioContext
+      sourceRef.current = source
+      processorRef.current = processor
+      gainRef.current = gain
+
+      setConversationActive(true)
+      setPhase("idle")
+    } catch (err) {
+      stopSession()
+      setConversationActive(false)
+      setError(
+        err instanceof Error
+          ? describeMicError(err.message)
+          : "Kutadza kuvhura mic."
+      )
+      setPhase("idle")
+    }
   }
 
-  // ── Render ────────────────────────────────────────────────────────────────
+  const handleEndConversation = () => {
+    stopSession()
+    setConversationActive(false)
+    setCurrentTranscript("")
+    setCurrentReply("")
+    setTurns([])
+    setError("")
+    setPhase("idle")
+  }
 
   const orbState = toOrbState(phase)
-  const showMicError = hasAttemptedStart && Boolean(vad.errored)
-  const label = vad.loading
-    ? "Ndinotanga..."
-    : showMicError
-      ? "Mic yakundikana"
-      : statusLabel(phase, conversationActive)
+  const label = statusLabel(phase, conversationActive)
 
   return (
     <div className="flex w-full flex-col items-center gap-6">
-      {(conversationActive || turns.length > 0) && (
+      {conversationActive && (
         <div className="flex w-full max-w-md justify-end">
           <button
             type="button"
             onClick={handleEndConversation}
-            disabled={isResetting || phase === "processing" || phase === "speaking"}
-            className="inline-flex items-center gap-2 rounded-full border border-stone-200 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+            className="inline-flex items-center gap-2 rounded-full border border-stone-200 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted"
           >
             <PhoneOff className="h-3.5 w-3.5" />
             Pedza hurukuro
@@ -328,7 +380,6 @@ export function S2SPanel() {
         </div>
       )}
 
-      {/* Orb */}
       <ShaderOrb
         size={280}
         state={orbState}
@@ -341,7 +392,6 @@ export function S2SPanel() {
         }}
       />
 
-      {/* Status label */}
       <AnimatePresence mode="wait">
         <motion.p
           key={label}
@@ -355,43 +405,50 @@ export function S2SPanel() {
         </motion.p>
       </AnimatePresence>
 
-      {/* Error */}
+      <p className="max-w-sm text-center text-xs text-muted-foreground">
+        Gemini Live inonzwa zvakananga, yobva yatumira mhinduro yemavara kuti
+        TTS yako yechiShona ibudise izwi.
+      </p>
+
       {error && (
         <p className="max-w-sm text-center text-xs text-red-500">{error}</p>
       )}
-      {showMicError && !error && vad.errored && (
-        <p className="max-w-sm text-center text-xs text-red-500">
-          {describeMicError(vad.errored)}
-        </p>
-      )}
 
-      {showMicError && (
-        <button
-          type="button"
-          onClick={handleRetryMic}
-          className="inline-flex h-10 items-center justify-center rounded-full border border-stone-200 px-4 text-xs text-muted-foreground transition-colors hover:bg-muted"
-        >
-          Edza mic zvakare
-        </button>
-      )}
-
-      {!conversationActive && !showMicError && (
+      {!conversationActive && (
         <button
           type="button"
           onClick={handleStartConversation}
-          disabled={vad.loading || isResetting}
-          className="inline-flex h-11 items-center justify-center gap-2 rounded-full border border-stone-200 px-5 text-sm font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex h-11 items-center justify-center gap-2 rounded-full border border-stone-200 px-5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
         >
           <Mic className="h-4 w-4" />
-          <span>Taura</span>
+          <span>{hasAttemptedStart ? "Taura Live zvakare" : "Taura Live"}</span>
         </button>
       )}
 
-      {/* Conversation history */}
+      {(currentTranscript || currentReply) && (
+        <div className="mt-2 flex w-full max-w-md flex-col gap-2 rounded-xl border border-stone-200/60 bg-white/60 p-4 text-sm backdrop-blur-sm">
+          {currentTranscript && (
+            <p className="text-muted-foreground">
+              <span className="font-medium text-foreground">Iwe: </span>
+              {currentTranscript}
+            </p>
+          )}
+          {currentReply && (
+            <p className="text-muted-foreground">
+              <span className="font-medium text-foreground">AI: </span>
+              {currentReply}
+            </p>
+          )}
+        </div>
+      )}
+
       {turns.length > 0 && (
         <div className="mt-2 flex w-full max-w-md flex-col gap-4">
-          {turns.map((turn, i) => (
-            <div key={i} className="flex flex-col gap-1 rounded-xl border border-stone-200/60 bg-white/60 p-4 text-sm backdrop-blur-sm">
+          {turns.map((turn, index) => (
+            <div
+              key={`${turn.transcript}-${index}`}
+              className="flex flex-col gap-1 rounded-xl border border-stone-200/60 bg-white/60 p-4 text-sm backdrop-blur-sm"
+            >
               {turn.transcript && (
                 <p className="text-muted-foreground">
                   <span className="font-medium text-foreground">Iwe: </span>
