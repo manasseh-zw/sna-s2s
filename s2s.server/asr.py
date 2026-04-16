@@ -1,13 +1,20 @@
-"""ASR engine – Wav2Vec2-BERT (CTC) for Shona."""
+"""ASR engines: Wav2Vec2-BERT (CTC) and Whisper for Shona/English."""
 
 import subprocess
 from pathlib import Path
 
 import numpy as np
 import torch
-from transformers import Wav2Vec2BertForCTC, Wav2Vec2BertProcessor
+from transformers import (
+    AutoModelForSpeechSeq2Seq,
+    AutoProcessor,
+    Wav2Vec2BertForCTC,
+    Wav2Vec2BertProcessor,
+    pipeline,
+)
 
 DEFAULT_W2V_PATH = Path("/Users/manasseh/models/shona/w2v-bert-sna")
+DEFAULT_WHISPER_PATH = Path("/Users/manasseh/models/shona/sna-whisper-asr")
 
 _SAMPLE_RATE = 16_000  # model expects 16 kHz
 _CHUNK_SECONDS = 25  # process audio in 25-second chunks to avoid OOM
@@ -90,6 +97,81 @@ class ASREngine:
         """Transcribe with Wav2Vec2-BERT CTC (Shona fine-tuned).
 
         Long audio is split into chunks to avoid OOM on the attention matrices.
+        """
+        audio = _decode_audio(audio_bytes)
+        if _is_silent(audio):
+            return ""
+
+        if len(audio) <= _CHUNK_SAMPLES:
+            return self._transcribe_chunk(audio)
+
+        parts: list[str] = []
+        for start in range(0, len(audio), _CHUNK_SAMPLES):
+            chunk = audio[start : start + _CHUNK_SAMPLES]
+            if _is_silent(chunk):
+                continue
+            text = self._transcribe_chunk(chunk)
+            if text:
+                parts.append(text)
+
+        return " ".join(parts)
+
+
+class WhisperEngine:
+    """Whisper ASR engine for Shona–English (Turbo fine-tune)."""
+
+    def __init__(self, whisper_path: Path = DEFAULT_WHISPER_PATH) -> None:
+        if torch.cuda.is_available():
+            self._device = "cuda:0"
+            self._dtype = torch.float16
+        elif torch.backends.mps.is_available():
+            self._device = "mps"
+            self._dtype = torch.float16
+        else:
+            self._device = "cpu"
+            self._dtype = torch.float32
+
+        print(f"  Loading Whisper from {whisper_path} …")
+        if not whisper_path.exists():
+            raise FileNotFoundError(f"Whisper model not found: {whisper_path}")
+
+        self._processor = AutoProcessor.from_pretrained(str(whisper_path))
+        self._model = (
+            AutoModelForSpeechSeq2Seq.from_pretrained(
+                str(whisper_path),
+                torch_dtype=self._dtype,
+                low_cpu_mem_usage=True,
+            )
+            .to(self._device)
+            .eval()
+        )
+
+        # We keep the actual decoding logic inside transformers' ASR pipeline.
+        # It will apply the right Whisper generation defaults (task, decoder prompts, etc.)
+        # based on `generate_kwargs`.
+        pipeline_kwargs: dict[str, object] = {}
+        if torch.cuda.is_available():
+            pipeline_kwargs["device"] = 0
+
+        self._asr = pipeline(
+            "automatic-speech-recognition",
+            model=self._model,
+            tokenizer=self._processor.tokenizer,
+            feature_extractor=self._processor.feature_extractor,
+            torch_dtype=self._dtype,
+            **pipeline_kwargs,
+        )
+
+    def _transcribe_chunk(self, audio: np.ndarray) -> str:
+        """Transcribe a single audio chunk that fits in memory."""
+        audio = audio.astype(np.float32)
+        out = self._asr(audio, generate_kwargs={"task": "transcribe"})
+        return (out.get("text") or "").strip()
+
+    def transcribe(self, audio_bytes: bytes) -> str:
+        """Transcribe audio with Whisper.
+
+        Long audio is split into chunks to reduce memory usage.
         """
         audio = _decode_audio(audio_bytes)
         if _is_silent(audio):

@@ -4,13 +4,16 @@ import asyncio
 from base64 import b64encode
 from contextlib import asynccontextmanager
 from io import BytesIO
+import os
+from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
-from asr import ASREngine
+from asr import ASREngine, WhisperEngine
 from llm import LLMClient
 from tts import TTSEngine
 
@@ -21,7 +24,7 @@ from tts import TTSEngine
 
 
 class _AppState:
-    asr: ASREngine
+    asr: Any
     llm: LLMClient
     tts: TTSEngine
 
@@ -31,8 +34,18 @@ state = _AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("Loading ASR engine (Wav2Vec2-BERT)…")
-    state.asr = ASREngine()
+    asr_backend = os.getenv("ASR_BACKEND", "whisper").strip().lower()
+
+    whisper_path_env = os.getenv("ASR_WHISPER_PATH")
+    w2v_path_env = os.getenv("ASR_W2V_PATH")
+
+    if asr_backend in {"whisper", "sna-whisper", "sna-whisper-asr"}:
+        print("Loading ASR engine (Whisper)…")
+        state.asr = WhisperEngine(whisper_path=Path(whisper_path_env)) if whisper_path_env else WhisperEngine()
+    else:
+        print("Loading ASR engine (Wav2Vec2-BERT)…")
+        state.asr = ASREngine(w2v_path=Path(w2v_path_env)) if w2v_path_env else ASREngine()
+
     print("ASR engine ready.")
 
     print("Loading TTS engine…")
@@ -70,7 +83,7 @@ class TTSRequest(BaseModel):
 
 @app.post("/asr")
 async def asr_endpoint(file: UploadFile = File(...)):
-    """Transcribe with Wav2Vec2-BERT CTC (fast, Shona fine-tuned)."""
+    """Transcribe with the configured ASR backend (Wav2Vec2-BERT or Whisper)."""
     audio_bytes = await file.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio file.")

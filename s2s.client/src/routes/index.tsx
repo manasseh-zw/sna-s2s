@@ -7,7 +7,14 @@ import { VoiceInput } from "@/components/voice-input"
 import { transcribeAudio } from "@/lib/actions/asr"
 import { synthesizeSpeech } from "@/lib/actions/tts"
 import { createFileRoute } from "@tanstack/react-router"
-import { ArrowLeftRight, Mic, Play, RotateCcw, Upload, Volume2 } from "lucide-react"
+import {
+  ArrowLeftRight,
+  Mic,
+  Play,
+  RotateCcw,
+  Upload,
+  Volume2,
+} from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
 export const Route = createFileRoute("/")({ component: App, ssr: false })
@@ -66,7 +73,9 @@ function App() {
     uploadInputRef.current?.click()
   }
 
-  const handleAsrUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handleAsrUpload = async (
+    event: React.ChangeEvent<HTMLInputElement>
+  ) => {
     const file = event.target.files?.[0]
     if (!file) return
 
@@ -83,7 +92,9 @@ function App() {
       setTranscript(text)
       setAsrState("done")
     } catch (err) {
-      setAsrError(err instanceof Error ? err.message : "Upload transcription failed.")
+      setAsrError(
+        err instanceof Error ? err.message : "Upload transcription failed."
+      )
       setAsrState("error")
     } finally {
       setIsUploading(false)
