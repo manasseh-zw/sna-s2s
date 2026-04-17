@@ -8,15 +8,19 @@ from google import genai
 from google.genai import types
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite-preview"
-DEFAULT_LIVE_MODEL = "models/gemini-3.1-flash-live-preview"
+DEFAULT_LIVE_MODEL = "gemini-3.1-flash-live-preview"
 
 SYSTEM_PROMPT = (
-    "Iwe uri mubatsiri anopindura nechiShona chakareruka chete. "
-    "Usashandise Chirungu. Usashandise manhamba kana digit. "
-    "Mhinduro ngadzive pfupi, asi dzinogona kuwedzera zvishoma kana mubvunzo wada kutsanangurwa. "
-    "Kana transcript iine zvikanganiso, edza kufungidzira zvinorehwa wobatsira zvine hungwaru. "
-    "Kana zvisinganzwisisike zvachose, kumbira mushandisi adzokorore mubvunzo wake."
+    "Iwe uri mubatsiri anotaura nechiShona chakareruka chete. "
+    "Mutauro mukuru wemushandisi chiShona, saka dudzirawo ruzha rwake sechiShona kutanga. "
+    "Usashandise Chirungu, Spanish, Portuguese, Japanese, kana mimwe mitauro kunze kwekunge mushandisi azvitaura pachena uye zvinodiwa nemubvunzo. "
+    "Rega kuisa timestamps, bracketed timings, subtitle markers, kana zvinyorwa zvakaita se [0m10s]. "
+    "Ignore background speech, TV/radio audio, uye chero kudzokororwa kwezwi rako kunobva kuspeaker. "
+    "Kana transcript iine zvikanganiso, edza kufungidzira Shona yacho zvine hungwaru. "
+    "Kana zvisinganzwisisike zvachose, kumbira mushandisi adzokorore. "
+    "Mhinduro dzive dzakazara asi pfupi zvakaringana."
 )
+INTRO_GREETING = "Mhoro. Unogona kutaura zvino, uye ndichakupindura nechiShona."
 
 
 def create_gemini_client() -> genai.Client:
@@ -32,14 +36,24 @@ def create_gemini_client() -> genai.Client:
     )
 
 
+def normalize_live_model(model: str) -> str:
+    """Use the explicit Live model path form expected by the SDK examples."""
+    if model.startswith("models/"):
+        return model
+    return f"models/{model}"
+
+
 def create_live_connect_config() -> types.LiveConnectConfig:
     """Build the Live API config used by the realtime S2S bridge."""
     return types.LiveConnectConfig(
-        response_modalities=["TEXT"],
-        system_instruction=SYSTEM_PROMPT,
+        response_modalities=[types.Modality.AUDIO],
+        system_instruction=types.Content(
+            parts=[types.Part(text=SYSTEM_PROMPT)]
+        ),
         temperature=0.6,
-        max_output_tokens=140,
+        max_output_tokens=256,
         input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
                 disabled=False,
@@ -77,7 +91,7 @@ class LLMClient:
         config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             temperature=0.6,
-            max_output_tokens=140,
+            max_output_tokens=256,
             thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
         )
 

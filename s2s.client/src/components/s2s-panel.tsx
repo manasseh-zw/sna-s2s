@@ -16,12 +16,14 @@ interface Turn {
 }
 
 type LiveServerEvent =
+  | { type: "intro"; reply: string; wav_base64: string }
   | { type: "ready" }
   | { type: "voice_activity_start" }
   | { type: "voice_activity_end" }
   | { type: "transcript_partial"; text: string; finished?: boolean }
-  | { type: "reply_partial"; text: string }
+  | { type: "reply_partial"; text: string; finished?: boolean }
   | { type: "turn_complete"; transcript: string; reply: string; wav_base64: string }
+  | { type: "interrupted" }
   | { type: "error"; message: string }
 
 function toOrbState(phase: S2SPhase): AIOrbState {
@@ -134,6 +136,7 @@ export function S2SPanel() {
   const gainRef = useRef<GainNode | null>(null)
   const socketRef = useRef<WebSocket | null>(null)
   const phaseRef = useRef<S2SPhase>("idle")
+  const micUploadEnabledRef = useRef(true)
 
   useEffect(() => {
     phaseRef.current = phase
@@ -143,6 +146,7 @@ export function S2SPanel() {
     const audio = new Audio()
     audioRef.current = audio
     const onEnded = () => {
+      micUploadEnabledRef.current = true
       if (conversationActive) {
         setPhase("idle")
       }
@@ -186,6 +190,7 @@ export function S2SPanel() {
   }
 
   const stopSession = () => {
+    micUploadEnabledRef.current = false
     socketRef.current?.close()
     socketRef.current = null
     cleanupAudioGraph()
@@ -194,6 +199,7 @@ export function S2SPanel() {
   }
 
   const playReply = (wavBase64: string) => {
+    micUploadEnabledRef.current = false
     const bytes = Uint8Array.from(atob(wavBase64), (char) => char.charCodeAt(0))
     const outputBlob = new Blob([bytes], { type: "audio/wav" })
 
@@ -218,11 +224,19 @@ export function S2SPanel() {
 
   const handleServerEvent = (event: LiveServerEvent) => {
     switch (event.type) {
+      case "intro":
+        setCurrentReply(event.reply)
+        playReply(event.wav_base64)
+        return
       case "ready":
-        setPhase("idle")
+        if (phaseRef.current !== "speaking") {
+          setCurrentReply("")
+          setPhase("idle")
+        }
         return
       case "voice_activity_start":
         stopPlayback()
+        micUploadEnabledRef.current = true
         setActivityLevel(1)
         setPhase("listening")
         return
@@ -238,6 +252,11 @@ export function S2SPanel() {
       case "reply_partial":
         setCurrentReply(event.text)
         setPhase("processing")
+        return
+      case "interrupted":
+        stopPlayback()
+        setCurrentReply("")
+        setPhase("listening")
         return
       case "turn_complete":
         setTurns((prev) => [
@@ -321,6 +340,7 @@ export function S2SPanel() {
 
       processor.onaudioprocess = (processEvent) => {
         if (socket.readyState !== WebSocket.OPEN) return
+        if (!micUploadEnabledRef.current) return
 
         const samples = processEvent.inputBuffer.getChannelData(0)
         const pcm = downsampleToPcm(samples, audioContext.sampleRate)
@@ -338,8 +358,9 @@ export function S2SPanel() {
       processorRef.current = processor
       gainRef.current = gain
 
+      micUploadEnabledRef.current = false
       setConversationActive(true)
-      setPhase("idle")
+      setPhase("processing")
     } catch (err) {
       stopSession()
       setConversationActive(false)

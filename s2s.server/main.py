@@ -12,8 +12,6 @@ from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from starlette.websockets import WebSocketState
-
 from asr import ASREngine, WhisperEngine
 from live_s2s import run_live_s2s_session
 from llm import LLMClient
@@ -163,11 +161,4 @@ async def s2s_reset_endpoint():
 @app.websocket("/s2s/live")
 async def s2s_live_websocket(websocket: WebSocket):
     """Realtime speech-to-speech over Gemini Live with local TTS playback."""
-    try:
-        await run_live_s2s_session(websocket, state.tts)
-    except Exception as exc:
-        if websocket.client_state == WebSocketState.CONNECTING:
-            await websocket.accept()
-        if websocket.client_state == WebSocketState.CONNECTED:
-            await websocket.send_json({"type": "error", "message": str(exc)})
-            await websocket.close()
+    await run_live_s2s_session(websocket, state.tts)
