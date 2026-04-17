@@ -16,4 +16,5 @@ dependencies = [
     "openai>=2.30.0",
     "google-genai>=1.73.1",
     "python-dotenv>=1.2.2",
+    "livekit-agents[silero,turn-detector]~=1.4",
 ]
