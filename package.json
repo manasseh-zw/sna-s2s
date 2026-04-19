@@ -2,8 +2,9 @@
   "name": "sna-s2s",
   "private": true,
   "scripts": {
-    "dev": "concurrently --names \"server,client\" --prefix-colors \"cyan,magenta\" \"bun run dev:server\" \"bun run dev:client\"",
-    "dev:server": "cd s2s.server && uv run uvicorn main:app --reload --port 8000",
+    "dev": "concurrently --names \"server,worker,client\" --prefix-colors \"cyan,yellow,magenta\" \"bun run dev:server\" \"bun run dev:worker\" \"bun run dev:client\"",
+    "dev:server": "cd s2s.server && uv run --env-file .env uvicorn main:app --reload --port 8000",
+    "dev:worker": "cd s2s.server && uv run --env-file .env python3 livekit_chain.py dev",
     "dev:client": "cd s2s.client && bun run dev",
     "start": "bun run dev"
   },

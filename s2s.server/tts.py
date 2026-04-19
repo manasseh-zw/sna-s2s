@@ -3,6 +3,7 @@
 import io
 from pathlib import Path
 
+import numpy as np
 import torch
 from scipy.io.wavfile import write as wav_write
 from transformers import AutoTokenizer, VitsModel
@@ -43,7 +44,9 @@ class TTSEngine:
             waveform = self._model(**inputs).waveform.squeeze().cpu().float().numpy()
 
         sample_rate: int = self._model.config.sampling_rate
+        pcm_waveform = np.clip(waveform, -1.0, 1.0)
+        pcm_waveform = (pcm_waveform * 32767.0).astype(np.int16)
 
         buf = io.BytesIO()
-        wav_write(buf, sample_rate, waveform)
+        wav_write(buf, sample_rate, pcm_waveform)
         return buf.getvalue()

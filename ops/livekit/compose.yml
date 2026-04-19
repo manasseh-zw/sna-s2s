@@ -1,0 +1,13 @@
+name: sna-livekit
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: sna-livekit-server
+    env_file:
+      - .env
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "7882:7882/udp"
+    restart: unless-stopped

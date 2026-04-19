@@ -3,14 +3,17 @@
 import asyncio
 from base64 import b64encode
 from contextlib import asynccontextmanager
+import datetime as dt
 from io import BytesIO
 import os
 from pathlib import Path
 from typing import Any
+import uuid
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+from livekit import api as livekit_api
 from pydantic import BaseModel
 from asr import ASREngine, WhisperEngine
 from live_s2s import run_live_s2s_session
@@ -79,6 +82,58 @@ app.add_middleware(
 
 class TTSRequest(BaseModel):
     text: str
+
+
+class LiveKitSessionRequest(BaseModel):
+    room_name: str | None = None
+
+
+class LiveKitSessionResponse(BaseModel):
+    token: str
+    url: str
+    room_name: str
+    participant_identity: str
+
+
+def _create_livekit_session(room_name: str | None = None) -> LiveKitSessionResponse:
+    livekit_url = os.getenv("LIVEKIT_URL", "ws://127.0.0.1:7880").strip()
+    agent_name = os.getenv("LIVEKIT_AGENT_NAME", "sna-livekit-chain").strip()
+
+    room_name = room_name or f"sna-live-{uuid.uuid4().hex[:8]}"
+    participant_identity = f"web-{uuid.uuid4().hex[:8]}"
+
+    room_config = livekit_api.RoomConfiguration(name=room_name)
+    room_config.agents.append(
+        livekit_api.RoomAgentDispatch(
+            agent_name=agent_name,
+            metadata='{"pipeline":"chain","language":"sn"}',
+        )
+    )
+
+    token = (
+        livekit_api.AccessToken()
+        .with_identity(participant_identity)
+        .with_name("Web Voice User")
+        .with_grants(
+            livekit_api.VideoGrants(
+                room_join=True,
+                room=room_name,
+                can_publish=True,
+                can_subscribe=True,
+                can_publish_data=True,
+            )
+        )
+        .with_room_config(room_config)
+        .with_ttl(dt.timedelta(hours=1))
+        .to_jwt()
+    )
+
+    return LiveKitSessionResponse(
+        token=token,
+        url=livekit_url,
+        room_name=room_name,
+        participant_identity=participant_identity,
+    )
 
 
 @app.post("/asr")
@@ -156,6 +211,17 @@ async def s2s_reset_endpoint():
     """Clear the LLM conversation context to start a fresh session."""
     state.llm.reset_context()
     return {"status": "ok"}
+
+
+@app.post("/livekit/token")
+async def livekit_token_endpoint(body: LiveKitSessionRequest | None = None):
+    """Mint a room token for the browser and dispatch the LiveKit agent."""
+    try:
+        session = _create_livekit_session(body.room_name if body else None)
+    except ValueError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    return session.model_dump()
 
 
 @app.websocket("/s2s/live")

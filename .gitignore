@@ -8,3 +8,6 @@ bun.lockb
 # IDE
 .vscode/
 .idea/
+
+# Local infrastructure secrets
+ops/livekit/.env

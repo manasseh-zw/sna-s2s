@@ -62,6 +62,7 @@ class LocalASRSTT(stt.STT):
             )
         )
         self._engine = engine
+        self._language = os.getenv("LIVEKIT_STT_LANGUAGE", "sn")
 
     @property
     def model(self) -> str:
@@ -85,7 +86,7 @@ class LocalASRSTT(stt.STT):
         del language, conn_options
 
         alternatives = (
-            [SpeechData(language="sn", text=cleaned, confidence=1.0)]
+            [SpeechData(language=self._language, text=cleaned, confidence=1.0)]
             if cleaned
             else []
         )
@@ -294,9 +295,22 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session = AgentSession(
         vad=ctx.proc.userdata["vad"],
-        min_endpointing_delay=0.2,
-        max_endpointing_delay=1.2,
-        allow_interruptions=True,
+        turn_handling={
+            "endpointing": {
+                "mode": "dynamic",
+                "min_delay": float(os.getenv("LIVEKIT_MIN_ENDPOINTING_DELAY", "0.5")),
+                "max_delay": float(os.getenv("LIVEKIT_MAX_ENDPOINTING_DELAY", "1.8")),
+            },
+            "interruption": {
+                "enabled": True,
+                "mode": "adaptive",
+                "min_duration": float(os.getenv("LIVEKIT_INTERRUPT_MIN_DURATION", "0.4")),
+                "resume_false_interruption": True,
+            },
+            "preemptive_generation": {
+                "enabled": False,
+            },
+        },
     )
 
     agent = Agent(
@@ -307,7 +321,6 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     await session.start(agent=agent, room=ctx.room)
-    session.say(INTRO_GREETING, allow_interruptions=False)
     await shutdown_event.wait()
 
 
