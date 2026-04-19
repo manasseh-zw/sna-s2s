@@ -98,7 +98,6 @@ class LLMClient:
             system_instruction=SYSTEM_PROMPT,
             temperature=0.6,
             max_output_tokens=256,
-            thinking_config=types.ThinkingConfig(thinking_level="MINIMAL"),
         )
 
         response = self._client.models.generate_content(
