@@ -37,7 +37,7 @@ from tts import TTSEngine
 
 def load_asr_engine() -> ASREngine | WhisperEngine:
     """Load the configured ASR backend using the same env contract as FastAPI."""
-    asr_backend = os.getenv("ASR_BACKEND", "whisper").strip().lower()
+    asr_backend = os.getenv("ASR_BACKEND", "w2v").strip().lower()
     whisper_path_env = os.getenv("ASR_WHISPER_PATH")
     w2v_path_env = os.getenv("ASR_W2V_PATH")
 

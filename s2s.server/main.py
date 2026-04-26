@@ -17,7 +17,7 @@ from livekit import api as livekit_api
 from pydantic import BaseModel
 from asr import ASREngine, WhisperEngine
 from live_s2s import run_live_s2s_session
-from llm import LLMClient
+from llm import LLMClient, get_llm_backend_label
 from tts import TTSEngine
 
 
@@ -37,7 +37,7 @@ state = _AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asr_backend = os.getenv("ASR_BACKEND", "whisper").strip().lower()
+    asr_backend = os.getenv("ASR_BACKEND", "w2v").strip().lower()
 
     whisper_path_env = os.getenv("ASR_WHISPER_PATH")
     w2v_path_env = os.getenv("ASR_W2V_PATH")
@@ -55,7 +55,7 @@ async def lifespan(app: FastAPI):
     state.tts = TTSEngine()
     print("TTS engine ready.")
 
-    print("Connecting to LM Studio (tiny-aya-earth)…")
+    print(f"Connecting to {get_llm_backend_label()}…")
     state.llm = LLMClient()
     print("LLM client ready.")
 
