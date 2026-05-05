@@ -1,7 +1,5 @@
 import ShaderOrb, { type AIOrbState } from "@/components/shader-orb"
 import { createLiveKitSession } from "@/lib/actions/livekit"
-import { AnimatePresence, motion } from "motion/react"
-import { Mic, PhoneOff } from "lucide-react"
 import {
   ConnectionState,
   Room,
@@ -11,14 +9,11 @@ import {
   type RemoteTrack,
   type RemoteTrackPublication,
 } from "livekit-client"
+import { Mic, PhoneOff } from "lucide-react"
+import { AnimatePresence, motion } from "motion/react"
 import { useEffect, useRef, useState } from "react"
 
-type S2SPhase =
-  | "idle"
-  | "connecting"
-  | "listening"
-  | "processing"
-  | "speaking"
+type S2SPhase = "idle" | "connecting" | "listening" | "processing" | "speaking"
 
 function toOrbState(phase: S2SPhase): AIOrbState {
   if (phase === "listening") return "listening"
@@ -27,7 +22,7 @@ function toOrbState(phase: S2SPhase): AIOrbState {
 }
 
 function statusLabel(phase: S2SPhase, conversationActive: boolean): string {
-  if (!conversationActive) return "Dzvanya Taura Live"
+  if (!conversationActive) return "Dzvanya Taura Kuti Utange Hurukuro"
 
   switch (phase) {
     case "idle":
@@ -49,7 +44,10 @@ function describeMicError(raw: string): string {
   if (message.includes("notallowederror") || message.includes("permission")) {
     return "Microphone permission denied. Allow mic access in your browser/site settings."
   }
-  if (message.includes("notfounderror") || message.includes("device not found")) {
+  if (
+    message.includes("notfounderror") ||
+    message.includes("device not found")
+  ) {
     return "No microphone detected. Plug in a mic and verify your OS input device."
   }
   if (
@@ -81,7 +79,9 @@ export function S2SPanel() {
   const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null)
 
   const roomRef = useRef<Room | null>(null)
-  const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(new Map())
+  const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(
+    new Map()
+  )
   const introAudioRef = useRef<HTMLAudioElement | null>(null)
   const phaseRef = useRef<S2SPhase>("idle")
   const remoteSpeakingRef = useRef(false)
@@ -197,7 +197,8 @@ export function S2SPanel() {
       return
     }
 
-    const trackKey = publication.trackSid || track.sid || `${participant.identity}-audio`
+    const trackKey =
+      publication.trackSid || track.sid || `${participant.identity}-audio`
     const element = track.attach() as HTMLAudioElement
     element.autoplay = true
     element.dataset.participantIdentity = participant.identity
@@ -211,7 +212,8 @@ export function S2SPanel() {
     publication: RemoteTrackPublication,
     participant: Participant
   ) => {
-    const trackKey = publication.trackSid || track.sid || `${participant.identity}-audio`
+    const trackKey =
+      publication.trackSid || track.sid || `${participant.identity}-audio`
     const element = remoteAudioElementsRef.current.get(trackKey)
     if (!element) return
 
@@ -322,10 +324,10 @@ export function S2SPanel() {
         state={orbState}
         activityLevel={activityLevel}
         color={{
-          main: "#EDE7FF",
-          low: "#85AFFF",
-          mid: "#CDAFFA",
-          high: "#A4FCF5",
+          main: "#F2F7FF",
+          low: "#5B8CFF",
+          mid: "#8DB5FF",
+          high: "#DCEBFF",
         }}
       />
 
@@ -342,10 +344,7 @@ export function S2SPanel() {
         </motion.p>
       </AnimatePresence>
 
-      <p className="max-w-sm text-center text-xs text-muted-foreground">
-        LiveKit iri kubata room, mic, uye turn-taking. Chain yako ichiri
-        kushandisa ASR yako, Gemini Flash, neTTS yako yechiShona.
-      </p>
+      <p className="max-w-sm text-center text-xs text-muted-foreground"></p>
 
       {sessionMeta && (
         <div className="w-full max-w-md rounded-xl border border-stone-200/60 bg-white/60 p-4 text-xs text-muted-foreground backdrop-blur-sm">
@@ -371,7 +370,7 @@ export function S2SPanel() {
           className="inline-flex h-11 items-center justify-center gap-2 rounded-full border border-stone-200 px-5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
         >
           <Mic className="h-4 w-4" />
-          <span>{hasAttemptedStart ? "Taura Live zvakare" : "Taura Live"}</span>
+          <span>{hasAttemptedStart ? "Taura zvakare" : "Taura"}</span>
         </button>
       )}
     </div>

@@ -177,7 +177,7 @@ function App() {
   }, [])
 
   return (
-    <div className="flex min-h-svh flex-col items-center bg-[#f5f4f3] pt-16">
+    <div className="flex min-h-svh flex-col items-center bg-white pt-16">
       <Tabs className="w-full max-w-4xl" defaultValue="asr">
         <TabsList className="mx-auto rounded-xl border border-stone-200/50 p-1 **:data-[slot=tab-indicator]:rounded-lg **:data-[slot=tab-indicator]:border **:data-[slot=tab-indicator]:border-stone-100 **:data-[slot=tab-indicator]:shadow-none">
           <TabsTab
@@ -298,19 +298,15 @@ function App() {
                 <button
                   type="submit"
                   disabled={ttsPhase === "processing"}
-                  className="absolute right-3 bottom-3 inline-flex h-10 w-10 items-center justify-center overflow-hidden rounded-full border border-primary/20 bg-transparent text-foreground disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  <span
-                    aria-hidden="true"
-                    className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(205,175,250,1),transparent_50%),radial-gradient(ellipse_at_bottom_right,rgba(129,169,248,1),transparent_50%),radial-gradient(ellipse_at_top_left,rgba(247,203,191,1),transparent_50%),radial-gradient(ellipse_at_bottom_left,rgba(164,252,245,1),transparent_50%)]"
-                  />
+                className="absolute right-3 bottom-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
                   {ttsPhase === "processing" ? (
                     <span
                       aria-label="Processing"
-                      className="relative inline-block h-4 w-4 animate-spin rounded-full border-2 border-foreground/30 border-t-foreground"
+                      className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground"
                     />
                   ) : (
-                    <Volume2 className="relative h-5 w-5" />
+                    <Volume2 className="h-5 w-5" />
                   )}
                 </button>
               </form>
@@ -354,13 +350,9 @@ function App() {
                 <button
                   type="button"
                   onClick={handleTtsPlay}
-                  className="relative inline-flex h-12 w-12 items-center justify-center overflow-hidden rounded-full bg-transparent text-foreground"
+                  className="inline-flex h-12 w-12 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90"
                 >
-                  <span
-                    aria-hidden="true"
-                    className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(205,175,250,1),transparent_50%),radial-gradient(ellipse_at_bottom_right,rgba(129,169,248,1),transparent_50%),radial-gradient(ellipse_at_top_left,rgba(247,203,191,1),transparent_50%),radial-gradient(ellipse_at_bottom_left,rgba(164,252,245,1),transparent_50%)]"
-                  />
-                  <Play className="relative h-5 w-5" />
+                  <Play className="h-5 w-5" />
                 </button>
 
                 <button

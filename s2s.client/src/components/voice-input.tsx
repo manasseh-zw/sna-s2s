@@ -87,10 +87,10 @@ export function VoiceInput({
     <div className={cn("flex flex-col items-center justify-center", className)}>
       <motion.div
         className={cn(
-          "relative flex cursor-pointer items-center justify-center overflow-hidden rounded-full p-4 shadow-sm",
+          "relative flex cursor-pointer items-center justify-center overflow-hidden rounded-full p-4 shadow-sm transition-colors",
           _listening
             ? "border border-input bg-background text-foreground"
-            : "border border-stone-200 bg-transparent text-foreground"
+            : "bg-primary text-primary-foreground hover:bg-primary/90"
         )}
         layout
         transition={{
@@ -100,12 +100,6 @@ export function VoiceInput({
         }}
         onClick={onClickHandler}
       >
-        {!_listening && (
-          <div
-            aria-hidden="true"
-            className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,rgba(205,175,250,1),transparent_50%),radial-gradient(ellipse_at_bottom_right,rgba(129,169,248,1),transparent_50%),radial-gradient(ellipse_at_top_left,rgba(247,203,191,1),transparent_50%),radial-gradient(ellipse_at_bottom_left,rgba(164,252,245,1),transparent_50%)]"
-          />
-        )}
         <div className="flex h-8 w-8 items-center justify-center">
           {_listening ? (
             <motion.div
@@ -123,7 +117,7 @@ export function VoiceInput({
             <Mic
               className={cn(
                 "h-6 w-6",
-                _listening ? "text-foreground" : "text-foreground"
+                _listening ? "text-foreground" : "text-primary-foreground"
               )}
             />
           )}
