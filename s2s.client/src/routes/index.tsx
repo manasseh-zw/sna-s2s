@@ -1,4 +1,5 @@
 import { S2SPanel } from "@/components/s2s-panel"
+import { PromptInput } from "@/components/ui/prompt-input"
 import { Tabs, TabsList, TabsPanel, TabsTab } from "@/components/ui/tabs"
 import { TextEffect } from "@/components/ui/text-effect"
 import { TextShimmer } from "@/components/ui/text-shimmer"
@@ -19,6 +20,11 @@ import { useEffect, useRef, useState } from "react"
 
 export const Route = createFileRoute("/")({ component: App, ssr: false })
 
+const TTS_VOICES = [
+  { value: "Tatenda", label: "Tatenda", mode: "Local" },
+  { value: "Manasseh", label: "Manasseh", mode: "Remote" },
+] as const
+
 function App() {
   const [asrState, setAsrState] = useState<
     "idle" | "listening" | "transcribing" | "done" | "error"
@@ -35,6 +41,8 @@ function App() {
   const [ttsPlaying, setTtsPlaying] = useState(false)
   const [ttsSeed, setTtsSeed] = useState(42)
   const [ttsError, setTtsError] = useState("")
+  const [ttsVoice, setTtsVoice] =
+    useState<(typeof TTS_VOICES)[number]["value"]>("Tatenda")
 
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const audioBlobUrlRef = useRef<string | null>(null)
@@ -119,7 +127,9 @@ function App() {
     }
 
     try {
-      const base64 = await synthesizeSpeech({ data: { text: ttsText } })
+      const base64 = await synthesizeSpeech({
+        data: { text: ttsText, voice: ttsVoice },
+      })
       const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0))
       const wavBlob = new Blob([bytes], { type: "audio/wav" })
       const url = URL.createObjectURL(wavBlob)
@@ -277,45 +287,33 @@ function App() {
           <audio ref={audioRef} />
           {ttsPhase !== "result" ? (
             <div className="flex w-full max-w-lg flex-col gap-3">
-              <form
-                onSubmit={handleTtsSend}
-                className="relative w-full rounded-2xl border border-stone-200/70 bg-background p-4"
-              >
-                <textarea
+              <form onSubmit={handleTtsSend} className="w-full">
+                <PromptInput
                   value={ttsText}
-                  onChange={(e) => setTtsText(e.target.value)}
+                  onValueChange={setTtsText}
+                  onSubmit={startTts}
+                  voice={ttsVoice}
+                  onVoiceChange={(value) =>
+                    setTtsVoice(value as (typeof TTS_VOICES)[number]["value"])
+                  }
+                  voices={TTS_VOICES}
                   placeholder="nyora zvaunoda kunzwa"
                   disabled={ttsPhase === "processing"}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter" && !e.shiftKey) {
-                      e.preventDefault()
-                      startTts()
-                    }
-                  }}
-                  className="h-28 w-full resize-none rounded-xl bg-transparent p-3 text-base outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                  isSubmitting={ttsPhase === "processing"}
+                  className="w-full"
                 />
-
-                <button
-                  type="submit"
-                  disabled={ttsPhase === "processing"}
-                className="absolute right-3 bottom-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                  {ttsPhase === "processing" ? (
-                    <span
-                      aria-label="Processing"
-                      className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground/30 border-t-primary-foreground"
-                    />
-                  ) : (
-                    <Volume2 className="h-5 w-5" />
-                  )}
-                </button>
               </form>
+
               {ttsError && (
                 <p className="text-center text-sm text-red-500">{ttsError}</p>
               )}
             </div>
           ) : (
             <div className="flex w-full max-w-lg flex-col items-center justify-center gap-6">
+              <div className="inline-flex items-center gap-2 rounded-full border border-stone-200/70 px-3 py-1 text-sm text-muted-foreground">
+                <Volume2 className="h-4 w-4" />
+                {ttsVoice}
+              </div>
               <div className="w-full">
                 {ttsPlaying ? (
                   <ScrollingWaveform

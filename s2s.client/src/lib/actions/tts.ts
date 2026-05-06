@@ -1,7 +1,7 @@
 import { createServerFn } from "@tanstack/react-start"
 
 export const synthesizeSpeech = createServerFn({ method: "POST" })
-  .inputValidator((data: { text: string }) => data)
+  .inputValidator((data: { text: string; voice: string }) => data)
   .handler(async ({ data }) => {
     const res = await fetch("http://localhost:8000/tts", {
       method: "POST",

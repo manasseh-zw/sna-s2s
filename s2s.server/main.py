@@ -6,7 +6,6 @@ from contextlib import asynccontextmanager
 import datetime as dt
 from io import BytesIO
 import os
-from pathlib import Path
 from typing import Any
 import uuid
 
@@ -15,9 +14,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from livekit import api as livekit_api
 from pydantic import BaseModel
-from asr import ASREngine, WhisperEngine
 from live_s2s import run_live_s2s_session
 from llm import LLMClient, get_llm_backend_label
+from remote_speech import (
+    LOCAL_TTS_VOICE,
+    REMOTE_TTS_VOICE,
+    load_asr_engine,
+    load_remote_tts_engine,
+    remote_tts_enabled,
+    warm_remote_speech_service,
+)
 from tts import TTSEngine
 
 
@@ -29,7 +35,8 @@ from tts import TTSEngine
 class _AppState:
     asr: Any
     llm: LLMClient
-    tts: TTSEngine
+    tts: Any
+    remote_tts: Any | None
 
 
 state = _AppState()
@@ -37,23 +44,25 @@ state = _AppState()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    asr_backend = os.getenv("ASR_BACKEND", "w2v").strip().lower()
+    if remote_tts_enabled():
+        print("Preparing remote TTS backend (Modal HTTP endpoint)…")
+        print("Pinging remote speech health endpoint on startup…")
+        await asyncio.to_thread(warm_remote_speech_service)
+        print("Remote speech service is reachable.")
 
-    whisper_path_env = os.getenv("ASR_WHISPER_PATH")
-    w2v_path_env = os.getenv("ASR_W2V_PATH")
+    print("Loading speech backend (Local models)…")
 
-    if asr_backend in {"whisper", "sna-whisper", "sna-whisper-asr"}:
-        print("Loading ASR engine (Whisper)…")
-        state.asr = WhisperEngine(whisper_path=Path(whisper_path_env)) if whisper_path_env else WhisperEngine()
-    else:
-        print("Loading ASR engine (Wav2Vec2-BERT)…")
-        state.asr = ASREngine(w2v_path=Path(w2v_path_env)) if w2v_path_env else ASREngine()
-
+    state.asr = load_asr_engine()
     print("ASR engine ready.")
 
-    print("Loading TTS engine…")
     state.tts = TTSEngine()
-    print("TTS engine ready.")
+    print(f"Local TTS engine ready for voice '{LOCAL_TTS_VOICE}'.")
+
+    state.remote_tts = load_remote_tts_engine()
+    if state.remote_tts is not None:
+        print(f"Remote TTS engine ready for voice '{REMOTE_TTS_VOICE}'.")
+    else:
+        print("Remote TTS engine not configured; remote voice is unavailable.")
 
     print(f"Connecting to {get_llm_backend_label()}…")
     state.llm = LLMClient()
@@ -82,6 +91,7 @@ app.add_middleware(
 
 class TTSRequest(BaseModel):
     text: str
+    voice: str = LOCAL_TTS_VOICE
 
 
 class LiveKitSessionRequest(BaseModel):
@@ -157,8 +167,22 @@ async def tts_endpoint(body: TTSRequest):
     if not body.text.strip():
         raise HTTPException(status_code=400, detail="Text must not be empty.")
 
+    voice = body.voice.strip() or LOCAL_TTS_VOICE
+
+    if voice == REMOTE_TTS_VOICE:
+        engine = state.remote_tts
+        if engine is None:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Remote TTS voice '{REMOTE_TTS_VOICE}' is not configured.",
+            )
+    elif voice == LOCAL_TTS_VOICE:
+        engine = state.tts
+    else:
+        raise HTTPException(status_code=400, detail=f"Unsupported TTS voice '{voice}'.")
+
     try:
-        wav_bytes = await asyncio.to_thread(state.tts.synthesize, body.text)
+        wav_bytes = await asyncio.to_thread(engine.synthesize, body.text)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
