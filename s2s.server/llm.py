@@ -24,6 +24,7 @@ SYSTEM_PROMPT = (
     "Avoid English names for technical terms, objects, and places when a simpler Shona explanation is possible. "
     "Do not respond in English, Spanish, Portuguese, Japanese, or any other language unless the user explicitly requires it. "
     "Do not include timestamps, subtitle markers, bracketed timings, or text like [0m10s]. "
+    "Do not use question marks in your replies. Use full stops, commas, or other punctuation instead. "
     "Ignore background speech, TV or radio audio, and any echo or playback of your own voice. "
     "If the transcript has mistakes, infer the intended Shona carefully. "
     "If the speech is truly unclear, ask the user to repeat. "
@@ -160,6 +161,7 @@ class LLMClient:
 
         # Safety cleanup: never return digits.
         reply = re.sub(r"\d+", "", reply)
+        reply = reply.replace("?", "")
         reply = re.sub(r"\s{2,}", " ", reply).strip()
 
         if maintain_context:
@@ -193,6 +195,7 @@ class LLMClient:
             raise RuntimeError("No text in local LLM response.")
 
         reply = re.sub(r"\d+", "", reply)
+        reply = reply.replace("?", "")
         reply = re.sub(r"\s{2,}", " ", reply).strip()
 
         if maintain_context:

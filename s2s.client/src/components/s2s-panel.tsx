@@ -1,4 +1,12 @@
 import ShaderOrb, { type AIOrbState } from "@/components/shader-orb"
+import { Button } from "@/components/ui/button"
+import {
+  Conversation,
+  ConversationContent,
+  ConversationScrollButton,
+} from "@/components/ui/conversation"
+import { Dialog, DialogContent } from "@/components/ui/dialog"
+import { Message, MessageContent } from "@/components/ui/message"
 import { createLiveKitSession } from "@/lib/actions/livekit"
 import {
   ConnectionState,
@@ -9,11 +17,38 @@ import {
   type RemoteTrack,
   type RemoteTrackPublication,
 } from "livekit-client"
-import { Mic, PhoneOff } from "lucide-react"
 import { AnimatePresence, motion } from "motion/react"
+import { Mic, PhoneOff } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 
 type S2SPhase = "idle" | "connecting" | "listening" | "processing" | "speaking"
+
+type ConversationMessageStatus = "final" | "pending"
+
+interface ConversationMessage {
+  id: string
+  role: "user" | "assistant"
+  text: string
+  status: ConversationMessageStatus
+}
+
+type RoomTurnEventType =
+  | "conversation_ready"
+  | "user_turn_final"
+  | "assistant_turn_started"
+  | "assistant_turn_final"
+
+interface RoomTurnEventPayload {
+  type: RoomTurnEventType
+  id: string
+  text?: string
+  timestamp?: number
+}
+
+const INTRO_AUDIO_PATH = "/livekit-intro.wav"
+const INTRO_MESSAGE =
+  "Mhoro unogona kutaura zvino, uye ndichakupindura nechishona chakareruka"
+const TURN_EVENT_TOPIC = "s2s-turn"
 
 function toOrbState(phase: S2SPhase): AIOrbState {
   if (phase === "listening") return "listening"
@@ -63,20 +98,27 @@ function describeMicError(raw: string): string {
   return raw
 }
 
-interface SessionMeta {
-  roomName: string
-  participantIdentity: string
-}
+function isRoomTurnEventPayload(value: unknown): value is RoomTurnEventPayload {
+  if (!value || typeof value !== "object") return false
 
-const INTRO_AUDIO_PATH = "/livekit-intro.wav"
+  const event = value as Partial<RoomTurnEventPayload>
+  return (
+    typeof event.type === "string" &&
+    typeof event.id === "string" &&
+    (event.text === undefined || typeof event.text === "string") &&
+    (event.timestamp === undefined || typeof event.timestamp === "number")
+  )
+}
 
 export function S2SPanel() {
   const [phase, setPhase] = useState<S2SPhase>("idle")
   const [conversationActive, setConversationActive] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
   const [hasAttemptedStart, setHasAttemptedStart] = useState(false)
   const [activityLevel, setActivityLevel] = useState(0)
   const [error, setError] = useState("")
-  const [sessionMeta, setSessionMeta] = useState<SessionMeta | null>(null)
+  const [messages, setMessages] = useState<ConversationMessage[]>([])
+  const [assistantPending, setAssistantPending] = useState(false)
 
   const roomRef = useRef<Room | null>(null)
   const remoteAudioElementsRef = useRef<Map<string, HTMLAudioElement>>(
@@ -84,16 +126,23 @@ export function S2SPanel() {
   )
   const introAudioRef = useRef<HTMLAudioElement | null>(null)
   const phaseRef = useRef<S2SPhase>("idle")
+  const conversationActiveRef = useRef(false)
   const remoteSpeakingRef = useRef(false)
   const localSpeakingRef = useRef(false)
+  const suppressDialogCloseRef = useRef(false)
+  const textDecoderRef = useRef(new TextDecoder())
 
   useEffect(() => {
     phaseRef.current = phase
   }, [phase])
 
   useEffect(() => {
+    conversationActiveRef.current = conversationActive
+  }, [conversationActive])
+
+  useEffect(() => {
     return () => {
-      void stopSession()
+      void stopSession({ closeDialog: false })
     }
   }, [])
 
@@ -110,12 +159,30 @@ export function S2SPanel() {
       return
     }
 
-    setActivityLevel(conversationActive ? 0.15 : 0)
-    if (conversationActive) {
-      setPhase("idle")
-    } else {
-      setPhase("idle")
-    }
+    setActivityLevel(conversationActiveRef.current ? 0.15 : 0)
+    setPhase("idle")
+  }
+
+  const resetConversationState = () => {
+    setMessages([
+      {
+        id: "intro-message",
+        role: "assistant",
+        text: INTRO_MESSAGE,
+        status: "final",
+      },
+    ])
+    setAssistantPending(false)
+  }
+
+  const appendMessage = (message: ConversationMessage) => {
+    setMessages((current) => {
+      if (current.some((entry) => entry.id === message.id)) {
+        return current
+      }
+
+      return [...current, message]
+    })
   }
 
   const clearRemoteAudio = () => {
@@ -133,11 +200,12 @@ export function S2SPanel() {
     }
   }
 
-  const stopSession = async () => {
+  const stopSession = async ({ closeDialog = true } = {}) => {
     clearRemoteAudio()
     stopIntroAudio()
     remoteSpeakingRef.current = false
     localSpeakingRef.current = false
+    conversationActiveRef.current = false
 
     const room = roomRef.current
     roomRef.current = null
@@ -147,9 +215,14 @@ export function S2SPanel() {
     }
 
     setConversationActive(false)
-    setSessionMeta(null)
+    resetConversationState()
     setActivityLevel(0)
     setPhase("idle")
+
+    if (closeDialog) {
+      suppressDialogCloseRef.current = true
+      setDialogOpen(false)
+    }
   }
 
   const playIntroGreeting = async () => {
@@ -222,13 +295,56 @@ export function S2SPanel() {
     remoteAudioElementsRef.current.delete(trackKey)
   }
 
+  const handleRoomDataReceived = (payload: Uint8Array, topic?: string) => {
+    if (topic !== TURN_EVENT_TOPIC) return
+
+    try {
+      const text = textDecoderRef.current.decode(payload)
+      const parsed = JSON.parse(text) as unknown
+      if (!isRoomTurnEventPayload(parsed)) return
+
+      switch (parsed.type) {
+        case "conversation_ready":
+          return
+        case "assistant_turn_started":
+          setAssistantPending(true)
+          return
+        case "user_turn_final":
+          if (!parsed.text) return
+          appendMessage({
+            id: parsed.id,
+            role: "user",
+            text: parsed.text,
+            status: "final",
+          })
+          return
+        case "assistant_turn_final":
+          if (!parsed.text) return
+          setAssistantPending(false)
+          appendMessage({
+            id: parsed.id,
+            role: "assistant",
+            text: parsed.text,
+            status: "final",
+          })
+          return
+      }
+    } catch {
+      // Ignore malformed data packets from the room.
+    }
+  }
+
   const handleStartConversation = async () => {
-    if (conversationActive || phase === "connecting") return
+    if (conversationActiveRef.current || phaseRef.current === "connecting") {
+      return
+    }
 
     setHasAttemptedStart(true)
     setError("")
-    setSessionMeta(null)
+    resetConversationState()
+    setDialogOpen(true)
     setConversationActive(true)
+    conversationActiveRef.current = true
 
     const introPromise = playIntroGreeting()
 
@@ -242,6 +358,7 @@ export function S2SPanel() {
       room.on(RoomEvent.ConnectionStateChanged, (state: ConnectionState) => {
         if (state === ConnectionState.Connected) {
           setConversationActive(true)
+          conversationActiveRef.current = true
           if (phaseRef.current !== "speaking") {
             setActivityLevel(0.15)
             setPhase("idle")
@@ -273,15 +390,17 @@ export function S2SPanel() {
       room.on(RoomEvent.MediaDevicesError, (err: Error) => {
         setError(describeMicError(err.message))
       })
+      room.on(
+        RoomEvent.DataReceived,
+        (payload: Uint8Array, _participant, _kind, topic?: string) => {
+          handleRoomDataReceived(payload, topic)
+        }
+      )
 
       setPhase("connecting")
       await room.connect(session.url, session.token, { autoSubscribe: true })
       await room.startAudio()
 
-      setSessionMeta({
-        roomName: session.room_name,
-        participantIdentity: session.participant_identity,
-      })
       await introPromise
       await room.localParticipant.setMicrophoneEnabled(true)
       setActivityLevel(0.15)
@@ -301,78 +420,147 @@ export function S2SPanel() {
     setError("")
   }
 
+  const handleDialogOpenChange = (open: boolean) => {
+    if (!open && suppressDialogCloseRef.current) {
+      suppressDialogCloseRef.current = false
+      setDialogOpen(false)
+      return
+    }
+
+    setDialogOpen(open)
+
+    if (!open) {
+      void stopSession({ closeDialog: false })
+      setError("")
+    }
+  }
+
   const orbState = toOrbState(phase)
   const label = statusLabel(phase, conversationActive)
 
   return (
-    <div className="flex w-full flex-col items-center gap-6">
-      {conversationActive && (
-        <div className="flex w-full max-w-md justify-end">
+    <>
+      <div className="flex w-full flex-col items-center gap-6">
+        <ShaderOrb
+          size={280}
+          state={orbState}
+          activityLevel={activityLevel}
+          color={{
+            main: "#F2F7FF",
+            low: "#5B8CFF",
+            mid: "#8DB5FF",
+            high: "#DCEBFF",
+          }}
+        />
+
+        <AnimatePresence mode="wait">
+          <motion.p
+            key={label}
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.25 }}
+            className="text-sm text-muted-foreground"
+          >
+            {label}
+          </motion.p>
+        </AnimatePresence>
+
+        {error && !dialogOpen && (
+          <p className="max-w-sm text-center text-xs text-red-500">{error}</p>
+        )}
+
+        {!conversationActive && (
           <button
             type="button"
-            onClick={handleEndConversation}
-            className="inline-flex items-center gap-2 rounded-full border border-stone-200 px-3 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted"
+            onClick={handleStartConversation}
+            className="inline-flex h-11 items-center justify-center gap-2 rounded-full border border-stone-200 px-5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
           >
-            <PhoneOff className="h-3.5 w-3.5" />
-            Pedza hurukuro
+            <Mic className="h-4 w-4" />
+            <span>{hasAttemptedStart ? "Taura zvakare" : "Taura"}</span>
           </button>
-        </div>
-      )}
+        )}
+      </div>
 
-      <ShaderOrb
-        size={280}
-        state={orbState}
-        activityLevel={activityLevel}
-        color={{
-          main: "#F2F7FF",
-          low: "#5B8CFF",
-          mid: "#8DB5FF",
-          high: "#DCEBFF",
-        }}
-      />
-
-      <AnimatePresence mode="wait">
-        <motion.p
-          key={label}
-          initial={{ opacity: 0, y: 6 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -6 }}
-          transition={{ duration: 0.25 }}
-          className="text-sm text-muted-foreground"
+      <Dialog open={dialogOpen} onOpenChange={handleDialogOpenChange}>
+        <DialogContent
+          fullscreen
+          showCloseButton={false}
+          className="gap-0 overflow-hidden p-0"
         >
-          {label}
-        </motion.p>
-      </AnimatePresence>
+          <div className="flex min-h-0 flex-1 flex-col bg-background p-4 sm:p-6">
+            <div className="flex items-center justify-between gap-4 px-1 sm:px-2">
+              <div className="flex items-center gap-4">
+                <ShaderOrb
+                  size={72}
+                  state={orbState}
+                  activityLevel={activityLevel}
+                  color={{
+                    main: "#F2F7FF",
+                    low: "#5B8CFF",
+                    mid: "#8DB5FF",
+                    high: "#DCEBFF",
+                  }}
+                />
 
-      <p className="max-w-sm text-center text-xs text-muted-foreground"></p>
+                <AnimatePresence mode="wait">
+                  <motion.p
+                    key={`dialog-${label}`}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -6 }}
+                    transition={{ duration: 0.25 }}
+                    className="text-sm text-muted-foreground"
+                  >
+                    {label}
+                  </motion.p>
+                </AnimatePresence>
+              </div>
 
-      {sessionMeta && (
-        <div className="w-full max-w-md rounded-xl border border-stone-200/60 bg-white/60 p-4 text-xs text-muted-foreground backdrop-blur-sm">
-          <p>
-            <span className="font-medium text-foreground">Room: </span>
-            {sessionMeta.roomName}
-          </p>
-          <p>
-            <span className="font-medium text-foreground">Identity: </span>
-            {sessionMeta.participantIdentity}
-          </p>
-        </div>
-      )}
+              <Button
+                type="button"
+                variant="outline"
+                size="lg"
+                onClick={handleEndConversation}
+                className="h-12 rounded-full px-5"
+              >
+                <PhoneOff className="size-5" />
+                Pedza hurukuro
+              </Button>
+            </div>
 
-      {error && (
-        <p className="max-w-sm text-center text-xs text-red-500">{error}</p>
-      )}
+            <div className="min-h-0 flex-1 pt-5">
+              <Conversation className="h-full rounded-[32px] border border-stone-200/70 bg-white">
+                <ConversationContent className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-1 px-4 py-6 sm:px-8">
+                  {messages.map((message) => (
+                    <Message from={message.role} key={message.id}>
+                      <MessageContent>
+                        <p className="whitespace-pre-wrap">{message.text}</p>
+                      </MessageContent>
+                    </Message>
+                  ))}
+                  {assistantPending && (
+                    <Message from="assistant" key="assistant-pending">
+                      <MessageContent>
+                        <p className="text-muted-foreground">
+                          {phase === "speaking"
+                            ? "Ndiri kupindura..."
+                            : "Ndichifunga..."}
+                        </p>
+                      </MessageContent>
+                    </Message>
+                  )}
+                </ConversationContent>
+                <ConversationScrollButton className="shadow-none" />
+              </Conversation>
+            </div>
 
-      {!conversationActive && (
-        <button
-          type="button"
-          onClick={handleStartConversation}
-          className="inline-flex h-11 items-center justify-center gap-2 rounded-full border border-stone-200 px-5 text-sm font-medium text-foreground transition-colors hover:bg-muted"
-        >
-          <Mic className="h-4 w-4" />
-          <span>{hasAttemptedStart ? "Taura zvakare" : "Taura"}</span>
-        </button>
-      )}
-    </div>
+            {error && (
+              <p className="pt-4 text-center text-xs text-red-500">{error}</p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
   )
 }

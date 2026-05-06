@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
-from pathlib import Path
 import re
+import time
+from typing import Awaitable, Callable
 import uuid
 
 from livekit import rtc
@@ -30,31 +32,29 @@ from livekit.agents.tts.tts import ChunkedStream
 from livekit.agents.utils.audio import combine_frames
 from livekit.plugins import silero
 
-from asr import ASREngine, WhisperEngine
 from llm import DEFAULT_MODEL, INTRO_GREETING, SYSTEM_PROMPT, create_gemini_client
-from tts import TTSEngine
+from remote_speech import (
+    load_asr_engine,
+    load_tts_engine,
+    resolve_tts_sample_rate,
+    using_remote_speech,
+    warm_remote_speech_service,
+)
+
+TURN_EVENT_TOPIC = "s2s-turn"
 
 
-def load_asr_engine() -> ASREngine | WhisperEngine:
-    """Load the configured ASR backend using the same env contract as FastAPI."""
-    asr_backend = os.getenv("ASR_BACKEND", "w2v").strip().lower()
-    whisper_path_env = os.getenv("ASR_WHISPER_PATH")
-    w2v_path_env = os.getenv("ASR_W2V_PATH")
-
-    if asr_backend in {"whisper", "sna-whisper", "sna-whisper-asr"}:
-        return (
-            WhisperEngine(whisper_path=Path(whisper_path_env))
-            if whisper_path_env
-            else WhisperEngine()
-        )
-
-    return ASREngine(w2v_path=Path(w2v_path_env)) if w2v_path_env else ASREngine()
+RoomEventPublisher = Callable[[dict[str, object]], Awaitable[None]]
 
 
 class LocalASRSTT(stt.STT):
     """LiveKit STT adapter around the existing offline ASR engine."""
 
-    def __init__(self, engine: ASREngine | WhisperEngine) -> None:
+    def __init__(
+        self,
+        engine,
+        on_user_turn_final: RoomEventPublisher | None = None,
+    ) -> None:
         super().__init__(
             capabilities=stt.STTCapabilities(
                 streaming=False,
@@ -63,6 +63,7 @@ class LocalASRSTT(stt.STT):
         )
         self._engine = engine
         self._language = os.getenv("LIVEKIT_STT_LANGUAGE", "sn")
+        self._on_user_turn_final = on_user_turn_final
 
     @property
     def model(self) -> str:
@@ -90,6 +91,16 @@ class LocalASRSTT(stt.STT):
             if cleaned
             else []
         )
+
+        if cleaned and self._on_user_turn_final is not None:
+            await self._on_user_turn_final(
+                {
+                    "type": "user_turn_final",
+                    "id": uuid.uuid4().hex,
+                    "text": cleaned,
+                    "timestamp": _timestamp_ms(),
+                }
+            )
 
         return SpeechEvent(
             type=SpeechEventType.FINAL_TRANSCRIPT,
@@ -121,6 +132,15 @@ class GeminiTextLLMStream(llm.LLMStream):
         self._adapter = llm_adapter
 
     async def _run(self) -> None:
+        if self._adapter._on_assistant_turn_started is not None:
+            await self._adapter._on_assistant_turn_started(
+                {
+                    "type": "assistant_turn_started",
+                    "id": uuid.uuid4().hex,
+                    "timestamp": _timestamp_ms(),
+                }
+            )
+
         contents: list[dict[str, object]] = []
         for message in self.chat_ctx.messages():
             text = message.text_content
@@ -149,11 +169,22 @@ class GeminiTextLLMStream(llm.LLMStream):
 
         reply = (response.text or "").strip()
         reply = re.sub(r"\d+", "", reply)
+        reply = reply.replace("?", "")
         reply = re.sub(r"\[[^\]]*\]", " ", reply)
         reply = re.sub(r"\s{2,}", " ", reply).strip()
 
         if not reply:
             reply = "Ndapota dzokorora zvakare zvishoma."
+
+        if self._adapter._on_assistant_turn_final is not None:
+            await self._adapter._on_assistant_turn_final(
+                {
+                    "type": "assistant_turn_final",
+                    "id": uuid.uuid4().hex,
+                    "text": reply,
+                    "timestamp": _timestamp_ms(),
+                }
+            )
 
         self._event_ch.send_nowait(
             ChatChunk(
@@ -166,10 +197,17 @@ class GeminiTextLLMStream(llm.LLMStream):
 class GeminiTextLLM(llm.LLM):
     """LiveKit LLM adapter using Gemini text generation."""
 
-    def __init__(self, model: str | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        on_assistant_turn_started: RoomEventPublisher | None = None,
+        on_assistant_turn_final: RoomEventPublisher | None = None,
+    ) -> None:
         super().__init__()
         self._client = create_gemini_client()
         self._model = model or os.getenv("GEMINI_TEXT_MODEL", DEFAULT_MODEL)
+        self._on_assistant_turn_started = on_assistant_turn_started
+        self._on_assistant_turn_final = on_assistant_turn_final
 
     @property
     def model(self) -> str:
@@ -248,10 +286,10 @@ class LocalTTSChunkedStream(ChunkedStream):
 class LocalTTS(tts.TTS):
     """LiveKit TTS adapter around the local non-streaming TTS model."""
 
-    def __init__(self, engine: TTSEngine) -> None:
+    def __init__(self, engine) -> None:
         super().__init__(
             capabilities=tts.TTSCapabilities(streaming=False, aligned_transcript=False),
-            sample_rate=engine._model.config.sampling_rate,
+            sample_rate=resolve_tts_sample_rate(engine),
             num_channels=1,
         )
         self._engine = engine
@@ -282,9 +320,31 @@ def prewarm(proc: JobProcess) -> None:
         prefix_padding_duration=0.35,
         activation_threshold=0.55,
     )
+    if using_remote_speech():
+        print("Using remote Modal speech backend for LiveKit worker…")
+        print("Pinging remote speech health endpoint on worker startup…")
+        warm_remote_speech_service()
+    else:
+        print("Using local speech models for LiveKit worker…")
     proc.userdata["asr_engine"] = load_asr_engine()
-    proc.userdata["tts_engine"] = TTSEngine()
-    proc.userdata["gemini_llm"] = GeminiTextLLM()
+    proc.userdata["tts_engine"] = load_tts_engine()
+
+
+def _timestamp_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _create_room_event_publisher(
+    participant: rtc.LocalParticipant,
+) -> RoomEventPublisher:
+    async def publish(payload: dict[str, object]) -> None:
+        await participant.publish_data(
+            json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            reliable=True,
+            topic=TURN_EVENT_TOPIC,
+        )
+
+    return publish
 
 
 async def entrypoint(ctx: JobContext) -> None:
@@ -312,15 +372,29 @@ async def entrypoint(ctx: JobContext) -> None:
             },
         },
     )
+    publish_room_event = _create_room_event_publisher(ctx.room.local_participant)
 
     agent = Agent(
         instructions=SYSTEM_PROMPT,
-        stt=LocalASRSTT(ctx.proc.userdata["asr_engine"]),
-        llm=ctx.proc.userdata["gemini_llm"],
+        stt=LocalASRSTT(
+            ctx.proc.userdata["asr_engine"],
+            on_user_turn_final=publish_room_event,
+        ),
+        llm=GeminiTextLLM(
+            on_assistant_turn_started=publish_room_event,
+            on_assistant_turn_final=publish_room_event,
+        ),
         tts=LocalTTS(ctx.proc.userdata["tts_engine"]),
     )
 
     await session.start(agent=agent, room=ctx.room)
+    await publish_room_event(
+        {
+            "type": "conversation_ready",
+            "id": uuid.uuid4().hex,
+            "timestamp": _timestamp_ms(),
+        }
+    )
     await shutdown_event.wait()
 
 
